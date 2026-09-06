@@ -67,8 +67,7 @@ cp .env.example .env
 然后编辑 `.env`，填入真实值（你给我的是这两个）：
 
 ```
-TG_API_ID=37215318
-TG_API_HASH=6bab1e029ff36064ad7e68d73223a0c5
+
 ```
 
 `.env` 已经在 `.gitignore` 里排除，不会被提交上去。
