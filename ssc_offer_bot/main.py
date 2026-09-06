@@ -53,6 +53,17 @@ log = logging.getLogger("ssc_offer_bot")
 
 client = TelegramClient(config.SESSION_NAME, config.API_ID, config.API_HASH)
 state = StateStore(config.DB_PATH)
+@client.on(events.NewMessage())
+async def debug_all_messages(event):
+    try:
+        chat = await event.get_chat()
+        chat_title = getattr(chat, "title", None) or getattr(chat, "first_name", "私聊/未知")
+    except Exception:
+        chat_title = "获取失败"
+    log.info(
+        f"[DEBUG] chat_id={event.chat_id} chat_title={chat_title!r} "
+        f"mentioned={event.message.mentioned} text={event.raw_text[:80]!r}"
+    )
 
 
 def get_leader_tags(org_unit: str, dept_text: str) -> list:
