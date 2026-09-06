@@ -1,0 +1,16 @@
+# 密钥 & 本地配置
+.env
+
+# Telegram session（包含登录态，等同于账号凭证，绝对不能提交）
+*.session
+*.session-journal
+
+# 运行时数据
+offer_state.json
+bot.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
