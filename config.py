@@ -23,14 +23,14 @@ if not API_ID or not API_HASH:
 # ========== 群组 ==========
 # 强烈建议使用数字ID而不是群名字符串（更稳定，不受改群名影响）。
 # 获取方式：先用 list_chats.py 跑一遍，把打印出来的 ID 复制过来替换下面的值。
-GROUP_HRBP = "恒睿SSC/HRBP-沟通群"          # 场景一：来源群，HRBP在这里@你发offer消息
-GROUP_LEADERSHIP = "恒睿公司-联合管理工作群"   # 场景二/三：审批流转 + 最终入职确认发布的群
-GROUP_RECRUIT = "恒睿公司招聘群"             # 场景二：简历 & 最终"请招聘私聊我"消息所在群
+GROUP_HRBP = "-5447064641"          # 场景一：来源群，HRBP在这里@你发offer消息
+GROUP_LEADERSHIP = "-5365249364"   # 场景二/三：审批流转 + 最终入职确认发布的群
+GROUP_RECRUIT = "-5577108580"             # 场景二：简历 & 最终"请招聘私聊我"消息所在群
 
 # ========== 审批链角色（填 Telegram 用户名，不带 @） ==========
-LEADER_FIRST = "DaBai10010"        # 一级审批：白一舟，收到"好的"作为一级通过标志
-LEADER_SECOND_TECH = "hk88mc996"   # 技术中心专属二级审批人
-LEADER_FINAL = "chuqianyiding"     # 终审人（所有部门最终都要走到这一步）
+LEADER_FIRST = "oiyr90557"        # 一级审批：白一舟，收到"好的"作为一级通过标志
+LEADER_SECOND_TECH = "ffuuyao"   # 技术中心专属二级审批人
+LEADER_FINAL = "Zoey95274"     # 终审人（所有部门最终都要走到这一步）
 
 # 判断"编制组织"是否属于技术中心（需要走二级审批）的关键词
 TECH_CENTER_KEYWORDS = ["技术中心"]
