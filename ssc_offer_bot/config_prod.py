@@ -28,8 +28,8 @@ GROUP_LEADERSHIP = -5365249364   # 场景二/三：审批流转 + 最终入职�
 GROUP_RECRUIT = -5577108580           # 场景二：简历 & 最终"请招聘私聊我"消息所在群
 
 # ========== 审批链角色（填 Telegram 用户名，不带 @） ==========
-LEADER_FIRST = "DDbai01"        # 一级审批：白一舟，收到"好的"作为一级通过标志
-LEADER_SECOND_TECH = "haok001"   # 技术中心专属二级审批人
+LEADER_FIRST = "ffuuyao"        # 一级审批：白一舟，收到"好的"作为一级通过标志
+LEADER_SECOND_TECH = "hk88mc996"   # 技术中心专属二级审批人
 LEADER_FINAL = "Zoey95274"     # 终审人（所有部门最终都要走到这一步）
 
 # 判断"编制组织"是否属于技术中心（需要走二级审批）的关键词
@@ -61,7 +61,7 @@ DEPARTMENT_LEADER_TAGS = [
 
 # 如果一个候选人的部门没有匹配到上面任何规则，用这个兜底名单，
 # 并会在日志里打印警告，提醒你去补充配置。
-DEFAULT_LEADERS = ["DDbai01", "haok001"]
+DEFAULT_LEADERS = ["DaBai10010", "chuqianyiding"]
 
 # ========== 本地状态文件 ==========
 DB_PATH = "offer_state.json"
