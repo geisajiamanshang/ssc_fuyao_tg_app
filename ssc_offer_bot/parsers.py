@@ -13,6 +13,7 @@ parse_kv_fields() 会把这样的文本解析成一个 dict，供后续拼接新
 """
 
 import re
+import unicodedata
 
 
 def is_offer_message(text: str) -> bool:
@@ -28,8 +29,18 @@ def offer_header_org(text: str) -> str:
 
 
 def is_approval(text: str) -> bool:
-    value = text.strip().casefold().strip("。.!！ ")
-    return value in {"好的", "好", "ok", "okay", "同意", "通过", "批准", "审批通过", "同意通过", "可以", "没问题", "收到，同意", "收到,同意"}
+    """识别明确同意，包括批量确认、表情和数字；否定/待定不推进。"""
+    value = unicodedata.normalize("NFKC", text or "").casefold()
+    value = re.sub(r"@[a-z0-9_]+", "", value)
+    value = re.sub(r"[\s\ufe0f\U0001f3fb-\U0001f3ff]+", "", value)
+    value = value.strip("。.!！,，;；:：、'\"‘’“”")
+    # 不能把“不同意”“不ok”“同意，但需要修改”当作审批通过。
+    if re.search(r"不(?!错)|未|否|拒绝|暂|待|稍后|等|考虑|修改|调整|但是|但|不过|\?|？", value):
+        return False
+    token = r"(?:好的|好|ok(?:ay)?|👌|1|同意通过|同意|审批通过|审核通过|通过|批准|可以|没问题|无异议|赞同|认可|确认通过)"
+    prefix = r"(?:(?:以上|上述|全部|所有|都|均|收到|已阅|我|这边|这几个|这几位|这些|候选人|信息)[,，:：、]*)*"
+    suffix = r"(?:[,，。!！、]*(?:了|的|啦|可以继续|请继续|继续下一步|请推进|可以推进|谢谢))*"
+    return bool(re.fullmatch(prefix + token + r"(?:[,，。!！、]*" + token + r")*" + suffix, value))
 
 # 字段名允许中文/英文/数字/下划线/斜杠，长度限制避免误把正文长句当成字段名
 _FIELD_PATTERN = re.compile(r"^\s*(?:[0-9０-９]+\s*[.．、)）]\s*)?([\u4e00-\u9fa5A-Za-z0-9_/]{1,20}?)[:：]\s*(.+?)\s*$")
