@@ -145,7 +145,11 @@ async def approval_target(event):
             config.GROUP_LEADERSHIP, max_id=event.message.id, limit=50
         ):
             compact = "".join((previous.raw_text or "").casefold().split())
-            if previous.sender_id == me.id and "offer信息确认" in compact:
+            known_prompt = any(
+                state.find_by_field(field, previous.id)[1]
+                for field in ("offer_confirm_msg_id", "second_review_msg_id", "final_review_msg_id")
+            )
+            if previous.sender_id == me.id and (known_prompt or "offer信息确认" in compact):
                 target = previous
                 break
     visited = set()
@@ -153,6 +157,14 @@ async def approval_target(event):
         if not target or target.id in visited:
             return None, None
         visited.add(target.id)
+        if target.sender_id == me.id:
+            for field in ("offer_confirm_msg_id", "second_review_msg_id", "final_review_msg_id"):
+                name, rec = state.find_by_field(field, target.id)
+                if rec:
+                    org = rec.get("org_unit")
+                    if field == "offer_confirm_msg_id":
+                        org = get_field(parse_kv_fields(target.raw_text or ""), "入职编制组织", "编制组织") or org
+                    return (name, dict(rec, org_unit=org)) if org else (None, None)
         compact = "".join((target.raw_text or "").casefold().split())
         if target.sender_id == me.id and "offer信息确认" in compact:
             name, rec = state.find_by_field("offer_confirm_msg_id", target.id)
@@ -183,10 +195,17 @@ async def process_leadership_reply(event):
         for value in (config.LEADER_FIRST, config.LEADER_SECOND_TECH, config.LEADER_FINAL)
         if value and value.strip().lstrip("@")
     }
-    if username not in leaders or not is_approval(msg.raw_text or ""):
+    if username not in leaders:
+        log.info("[场景2] 未匹配审批领导：username=%s msg_id=%s", username, msg.id)
+        return
+    if not is_approval(msg.raw_text or ""):
+        log.info("[场景2] 非明确同意回复：msg_id=%s", msg.id)
         return
     name, rec = await approval_target(event)
-    if not rec or msg.id <= rec.get("last_approval_msg_id", 0):
+    if not rec:
+        log.warning("[场景2] 未匹配Offer或审批提示：msg_id=%s reply_to=%s", msg.id, msg.reply_to_msg_id)
+        return
+    if msg.id <= rec.get("last_approval_msg_id", 0):
         return
     stage = rec.get("stage")
     if stage == "sent_to_leadership":
@@ -194,9 +213,9 @@ async def process_leadership_reply(event):
         leader = config.LEADER_SECOND_TECH if tech else config.LEADER_FINAL
         next_stage = "waiting_second_review" if tech else "waiting_final_review"
         id_field = "second_review_msg_id" if tech else "final_review_msg_id"
-        label = "二级审批" if tech else "终审"
+        label = "二级审批" if tech else "三级审批（终审）"
     elif stage == "waiting_second_review":
-        leader, next_stage, id_field, label = config.LEADER_FINAL, "waiting_final_review", "final_review_msg_id", "终审"
+        leader, next_stage, id_field, label = config.LEADER_FINAL, "waiting_final_review", "final_review_msg_id", "三级审批（终审）"
     elif stage == "waiting_final_review":
         await handle_final_approved(name, rec)
         state.update(name, last_approval_msg_id=msg.id)
@@ -205,7 +224,7 @@ async def process_leadership_reply(event):
         return
     sent = await client.send_message(
         config.GROUP_LEADERSHIP,
-        f"@{leader.strip().lstrip('@')} 初审已通过，请领导{label}，谢谢",
+        f"@{leader.strip().lstrip('@')} {'二级审批已通过' if stage == 'waiting_second_review' else '初审已通过'}，请领导{label}，谢谢",
         reply_to=rec["offer_confirm_msg_id"],
     )
     state.update(name, org_unit=rec["org_unit"], stage=next_stage,
