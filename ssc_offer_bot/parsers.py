@@ -58,6 +58,13 @@ def parse_kv_fields(text: str) -> dict:
             val = m.group(2).strip()
             if key and val:
                 fields[key] = val
+    # 面试评价可能以#开头并跨多行，保留正文直至面试官或末尾通知。
+    evaluation = re.search(
+        r"(?:^|\n)\s*#?\s*面试评价\s*[:：][ \t]*(.*?)(?=\n[ \t]*(?:主要面试官\s*[:：]|@[A-Za-z0-9_]+)|\Z)",
+        text, re.S,
+    )
+    if evaluation and evaluation.group(1).strip():
+        fields["面试评价"] = evaluation.group(1).strip()
     return fields
 
 

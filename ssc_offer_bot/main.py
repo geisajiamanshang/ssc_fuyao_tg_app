@@ -287,6 +287,7 @@ async def handle_final_approved(candidate_name: str, rec: dict):
         candidate_name,
         recruiter_username=recruiter_username,
         resume_msg_id=resume_msg.id,
+        resume_fields=parse_kv_fields(resume_msg.raw_text or ""),
         stage="waiting_recruiter_dm",
     )
     log.info(f"[场景2] 「{candidate_name}」终审通过，已在招聘群回复简历消息，等待招聘私聊补充入职信息")
@@ -314,9 +315,18 @@ async def on_private_message(event):
         return
 
     dm_fields = parse_kv_fields(text)
-    merged_fields = dict(rec.get("raw_fields", {}))
+    resume_fields = rec.get("resume_fields", {})
+    if not resume_fields and rec.get("resume_msg_id"):
+        resume_message = await client.get_messages(config.GROUP_RECRUIT, ids=rec["resume_msg_id"])
+        if resume_message:
+            resume_fields = parse_kv_fields(resume_message.raw_text or "")
+    merged_fields = dict(resume_fields)
+    merged_fields.update(rec.get("raw_fields", {}))
     merged_fields.update(dm_fields)
     merged_fields.setdefault("候选人姓名", candidate_name)
+    # 输出模板中简历来源填推荐人，招聘通道填资源来源；私聊明确字段优先。
+    merged_fields["简历来源"] = dm_fields.get("简历来源") or get_field(resume_fields, "简历推荐人") or merged_fields.get("简历来源", "")
+    merged_fields["招聘通道"] = dm_fields.get("招聘通道") or get_field(resume_fields, "招聘通道", "简历来源") or merged_fields.get("招聘通道", "")
 
     dept_text = merged_fields.get("入职部门", "") or merged_fields.get("编制组织", "")
     leaders = get_leader_tags(rec["org_unit"], dept_text)

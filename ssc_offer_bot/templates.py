@@ -46,7 +46,7 @@ def build_onboarding_confirm_message(org_unit: str, fields: dict, leader_usernam
 
     fields 是合并后的字段字典（场景一解析出的字段 + 招聘私聊补充的字段）。
     """
-    leaders_line = "  ".join(f"@{u}" for u in leader_usernames)
+    leaders_line = " ".join(f"@{u.strip().lstrip('@')}" for u in leader_usernames)
 
     return (
         f"{org_unit}【入职信息确认】\n"
@@ -58,10 +58,13 @@ def build_onboarding_confirm_message(org_unit: str, fields: dict, leader_usernam
         f"入职服务单位：{fields.get('入职服务单位', '')}\n"
         f"人员性质：{fields.get('人员性质', '')}\n"
         f"入职部门：{fields.get('入职部门', '')}\n"
-        f"直属上级：{fields.get('直属上级', '')}      岗位类型：{fields.get('岗位类型', '')}\n"
+        f"直属上级：{fields.get('直属上级', '')}\n"
+        f"岗位类型：{fields.get('岗位类型', '')}\n"
         f"职位：{fields.get('职位', '')}\n"
-        f"建议职级：{fields.get('建议职级', '')}     管理序列：{fields.get('管理序列', '')}\n"
-        f"办公方式：{fields.get('办公方式', '')}地区：{fields.get('地区', '')}\n"
+        f"建议职级：{fields.get('建议职级', '')}\n"
+        f"管理序列：{fields.get('管理序列', '')}\n"
+        f"办公方式：{fields.get('办公方式', '')}\n"
+        f"办公地区：{fields.get('办公地区', fields.get('地区', ''))}\n"
         f"2️⃣薪资信息\n"
         f"薪资货币：{fields.get('薪资货币', 'RMB')}\n"
         f"转正薪资：{fields.get('转正薪资', '')}\n"
@@ -70,14 +73,11 @@ def build_onboarding_confirm_message(org_unit: str, fields: dict, leader_usernam
         f"3️⃣招聘信息\n"
         f"招聘渠道：{fields.get('招聘渠道', '')}\n"
         f"简历来源：{fields.get('简历来源', '')}\n"
-        f"招聘专员：{fields.get('招聘专员', '')}\n"
-        f"招聘组长：{fields.get('招聘组长', '')}\n"
-        f"招聘主管：{fields.get('招聘主管', '')}\n"
-        f"招聘专员联系方式：{fields.get('招聘专员联系方式', '')}\n"
-        f"4️⃣入职信息：\n"
-        f"  1. 入职日期：{fields.get('入职日期', '')}\n"
-        f"  2. 候选人联系方式：{fields.get('候选人联系方式', '')}\n"
-        f"#面试评价：{fields.get('面试评价', '')}\n"
+        f"招聘通道：{fields.get('招聘通道', '')}\n"
+        f"4️⃣入职信息\n"
+        f"入职日期：{fields.get('入职日期', '')}\n"
+        f"候选人联系方式：{fields.get('候选人联系方式', '')}\n\n"
+        f"#面试评价：\n{fields.get('面试评价', '')}\n\n"
         f"主要面试官：{fields.get('主要面试官', '')}\n"
-        f"{leaders_line}  请知悉"
+        f"{leaders_line} 请知悉"
     )

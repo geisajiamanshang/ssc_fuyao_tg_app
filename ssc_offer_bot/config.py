@@ -42,6 +42,11 @@ TECH_CENTER_KEYWORDS = ["技术中心"]
 # 请根据你们实际的部门架构继续增补条目。
 DEPARTMENT_LEADER_TAGS = [
     {
+        "org_unit": "效能中心",
+        "dept_keywords": [""],
+        "leaders": ["DaBai10010", "chuqianyiding", "wean4790"],
+    },
+    {
         "org_unit": "运营中心",
         "dept_keywords": ["运营1部"],
         "leaders": ["DaBai10010", "chuqianyiding", "zlei1216", "wean4790"],
