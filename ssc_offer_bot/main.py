@@ -131,23 +131,56 @@ async def on_hrbp_offer(event):
 
 
 # ==================== 场景二：联合管理工作群里的审批链 ====================
+approval_lock = asyncio.Lock()
+
+
+async def first_review_target(event):
+    """引用回复匹配原Offer；普通回复匹配此前最近一条SSC Offer。"""
+    me = await client.get_me()
+    if event.message.reply_to_msg_id:
+        target = await event.message.get_reply_message()
+    else:
+        target = None
+        async for previous in client.iter_messages(
+            config.GROUP_LEADERSHIP, max_id=event.message.id, limit=50
+        ):
+            compact = "".join((previous.raw_text or "").casefold().split())
+            if previous.sender_id == me.id and "offer信息确认" in compact:
+                target = previous
+                break
+    if not target or target.sender_id != me.id:
+        return None, None
+    if "offer信息确认" not in "".join((target.raw_text or "").casefold().split()):
+        return None, None
+    name, rec = state.find_by_field("offer_confirm_msg_id", target.id)
+    if not rec or rec.get("stage") != "sent_to_leadership":
+        log.info("[场景2] 一级回复未匹配待审批Offer，target_id=%s", target.id)
+        return None, None
+    fields = parse_kv_fields(target.raw_text or "")
+    org_unit = get_field(fields, "入职编制组织", "编制组织") or rec.get("org_unit")
+    if not org_unit:
+        log.warning("[场景2] 一级回复对应Offer缺少入职编制组织，target_id=%s", target.id)
+        return None, None
+    return name, dict(rec, org_unit=org_unit)
+
+
 @client.on(events.NewMessage(chats=config.GROUP_LEADERSHIP))
 async def on_leadership_reply(event):
+    async with approval_lock:
+        await process_leadership_reply(event)
+
+
+async def process_leadership_reply(event):
     msg = event.message
     reply_to_id = msg.reply_to_msg_id
-    if not reply_to_id:
-        return
-
     sender = await event.get_sender()
-    sender_username = (sender.username or "").lower()
+    sender_username = (getattr(sender, "username", None) or "").lower()
     text = (msg.raw_text or "").strip()
 
     # ---- 1) 一级领导回复"好的" ----
-    name, rec = state.find_by_field("offer_confirm_msg_id", reply_to_id)
-    if rec and rec.get("stage") == "sent_to_leadership":
-        if sender_username != config.LEADER_FIRST.lower():
-            return
-        if not is_approval(text):
+    if sender_username == config.LEADER_FIRST.strip().lstrip("@").lower() and is_approval(text):
+        name, rec = await first_review_target(event)
+        if not rec:
             return
 
         if any(kw in rec["org_unit"] for kw in config.TECH_CENTER_KEYWORDS):
@@ -156,7 +189,7 @@ async def on_leadership_reply(event):
                 f"@{config.LEADER_SECOND_TECH} 初审已通过，请领导二级审批，谢谢",
                 reply_to=rec["offer_confirm_msg_id"],
             )
-            state.update(name, second_review_msg_id=sent.id, stage="waiting_second_review")
+            state.update(name, org_unit=rec["org_unit"], second_review_msg_id=sent.id, stage="waiting_second_review")
             log.info(f"[场景2] 「{name}」技术中心，已转二级审批，msg_id={sent.id}")
         else:
             sent = await client.send_message(
@@ -164,7 +197,7 @@ async def on_leadership_reply(event):
                 f"@{config.LEADER_FINAL} 初审已通过，请领导终审，谢谢",
                 reply_to=rec["offer_confirm_msg_id"],
             )
-            state.update(name, final_review_msg_id=sent.id, stage="waiting_final_review")
+            state.update(name, org_unit=rec["org_unit"], final_review_msg_id=sent.id, stage="waiting_final_review")
             log.info(f"[场景2] 「{name}」非技术中心，已直接转终审，msg_id={sent.id}")
         return
 
