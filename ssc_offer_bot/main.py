@@ -122,6 +122,7 @@ async def on_hrbp_offer(event):
         "org_unit": org_unit,
         "hrbp_username": hrbp_username,
         "offer_confirm_msg_id": sent.id,
+        "offer_confirm_text": new_text,
         "position": get_field(fields, "职位", "应聘岗位"),
         "salary_confirm": get_field(fields, "转正薪资"),
         "salary_probation": get_field(fields, "试用薪资"),
@@ -331,7 +332,15 @@ async def on_private_message(event):
     dept_text = merged_fields.get("入职部门", "") or merged_fields.get("编制组织", "")
     leaders = get_leader_tags(rec["org_unit"], dept_text)
 
-    final_text = build_onboarding_confirm_message(rec["org_unit"], merged_fields, leaders)
+    # 老记录从群内取回原Offer，新记录直接使用发送时保存的正文。
+    offer_text = rec.get("offer_confirm_text", "")
+    if not offer_text:
+        original_offer = await client.get_messages(config.GROUP_LEADERSHIP, ids=rec["offer_confirm_msg_id"])
+        offer_text = (original_offer.raw_text or "") if original_offer else ""
+    if not offer_text:
+        log.warning("[场景3] 原Offer消息不可用，已停止生成入职确认：%s", candidate_name)
+        return
+    final_text = build_onboarding_confirm_message(rec["org_unit"], merged_fields, leaders, offer_text)
 
     await client.send_message(
         config.GROUP_LEADERSHIP,

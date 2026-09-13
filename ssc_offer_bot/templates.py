@@ -39,45 +39,30 @@ def build_recruit_reply_message(
     )
 
 
-def build_onboarding_confirm_message(org_unit: str, fields: dict, leader_usernames: list) -> str:
-    """
-    场景三：招聘私聊补充完信息后，回复联合管理工作群里的【offer信息确认】，
-    发布完整的【入职信息确认】。
+def build_onboarding_confirm_message(
+    org_unit: str, fields: dict, leader_usernames: list, offer_text: str
+) -> str:
+    """保留原Offer正文，只更换标题、添加招聘/入职信息及末尾通知。"""
+    import re
+    from parsers import strip_header_footer
 
-    fields 是合并后的字段字典（场景一解析出的字段 + 招聘私聊补充的字段）。
-    """
-    leaders_line = " ".join(f"@{u.strip().lstrip('@')}" for u in leader_usernames)
-
-    return (
-        f"{org_unit}【入职信息确认】\n"
-        f"候选人编码：{fields.get('候选人编码', '')}\n"
-        f"候选人姓名：{fields.get('候选人姓名', '')}\n"
-        f"性别：{fields.get('性别', '')}\n"
-        f"1️⃣编制信息：\n"
-        f"入职编制组织：{fields.get('入职编制组织', org_unit)}\n"
-        f"入职服务单位：{fields.get('入职服务单位', '')}\n"
-        f"人员性质：{fields.get('人员性质', '')}\n"
-        f"入职部门：{fields.get('入职部门', '')}\n"
-        f"直属上级：{fields.get('直属上级', '')}\n"
-        f"岗位类型：{fields.get('岗位类型', '')}\n"
-        f"职位：{fields.get('职位', '')}\n"
-        f"建议职级：{fields.get('建议职级', '')}\n"
-        f"管理序列：{fields.get('管理序列', '')}\n"
-        f"办公方式：{fields.get('办公方式', '')}\n"
-        f"办公地区：{fields.get('办公地区', fields.get('地区', ''))}\n"
-        f"2️⃣薪资信息\n"
-        f"薪资货币：{fields.get('薪资货币', 'RMB')}\n"
-        f"转正薪资：{fields.get('转正薪资', '')}\n"
-        f"试用期：{fields.get('试用期', '2个月')}\n"
-        f"试用薪资：{fields.get('试用薪资', '')}\n"
-        f"3️⃣招聘信息\n"
+    if not offer_text.strip():
+        raise ValueError("缺少原Offer消息，不能重建或添加原文没有的字段")
+    body = strip_header_footer(offer_text)
+    supplement = (
+        "3️⃣招聘信息\n"
         f"招聘渠道：{fields.get('招聘渠道', '')}\n"
         f"简历来源：{fields.get('简历来源', '')}\n"
         f"招聘通道：{fields.get('招聘通道', '')}\n"
-        f"4️⃣入职信息\n"
+        "4️⃣入职信息\n"
         f"入职日期：{fields.get('入职日期', '')}\n"
-        f"候选人联系方式：{fields.get('候选人联系方式', '')}\n\n"
-        f"#面试评价：\n{fields.get('面试评价', '')}\n\n"
-        f"主要面试官：{fields.get('主要面试官', '')}\n"
-        f"{leaders_line} 请知悉"
+        f"候选人联系方式：{fields.get('候选人联系方式', '')}"
     )
+    # 只插入补充区，面试评价、其他未知字段和原有空字段均原样保留。
+    insertion = re.search(r"(?m)^[ \t]*#?[ \t]*(?:面试评价|主要面试官)[ \t]*[:：]", body)
+    if insertion:
+        body = body[:insertion.start()].rstrip() + "\n" + supplement + "\n\n" + body[insertion.start():]
+    else:
+        body = body.rstrip() + "\n" + supplement
+    leaders_line = " ".join(f"@{u.strip().lstrip('@')}" for u in leader_usernames)
+    return f"{org_unit}【入职信息确认】\n{body}\n\n{leaders_line} 请知悉"
