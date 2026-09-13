@@ -55,6 +55,111 @@ log = logging.getLogger("ssc_offer_bot")
 
 client = TelegramClient(config.SESSION_NAME, config.API_ID, config.API_HASH)
 state = StateStore(config.DB_PATH)
+outbox = StateStore(config.DB_PATH + ".outbox.json")
+ssc_send_lock = asyncio.Lock()
+
+
+async def get_ssc_reviewer():
+    account = getattr(config, "SSC_REVIEW_ACCOUNT", "")
+    if not account:
+        raise RuntimeError("未配置SSC审批私聊账号：SSC_REVIEW_ACCOUNT")
+    reviewer = await client.get_entity(account)
+    me = await client.get_me()
+    if reviewer.id == me.id or getattr(reviewer, "bot", False):
+        raise RuntimeError("SSC审批收件人必须是独立个人账号，不能是程序登录账号或机器人")
+    return reviewer
+
+
+async def queue_group_message(destination, text, *, candidate, expected_stage,
+                              updates, id_field=None, kind="message", reply_to=None, file=None):
+    """所有群消息统一先送SSC账号私聊；只有SSC的1能触发群内发送。"""
+    async with ssc_send_lock:
+        reviewer = await get_ssc_reviewer()
+        draft = await client.send_message(reviewer.id, text, file=file, parse_mode=None)
+        outbox.set(str(draft.id), {
+            "draft_id": draft.id, "destination": destination, "reply_to": reply_to,
+            "candidate": candidate, "expected_stage": expected_stage,
+            "updates": updates, "id_field": id_field, "kind": kind, "status": "pending",
+            "review_chat_id": reviewer.id,
+        })
+        state.update(candidate, stage=expected_stage)
+        log.info("[SSC审批] 草稿msg_id=%s，目标群=%s，等待SSC私聊发送1", draft.id, destination)
+
+
+@client.on(events.NewMessage(incoming=True))
+async def on_ssc_send_approval(event):
+    if (event.raw_text or "").strip() != "1":
+        return
+    me = await client.get_me()
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    async with ssc_send_lock:
+        # 仅处理最近草稿，重复1不会转而发送更早的草稿。
+        eligible = [r for r in outbox.all().values()
+                    if r["draft_id"] < event.message.id and r.get("review_chat_id") == reviewer.id]
+        if not eligible:
+            return
+        item = max(eligible, key=lambda r: r["draft_id"])
+        if item["status"] != "pending":
+            return
+        rec = state.get(item["candidate"])
+        if not rec or rec.get("stage") != item["expected_stage"]:
+            log.warning("[SSC审批] 草稿状态已失效，msg_id=%s", item["draft_id"])
+            return
+        # SSC在私聊发送修改版正文后再发送1；未修改则发送原草稿。
+        draft = None
+        async for previous in client.iter_messages(
+            reviewer.id, max_id=event.message.id, min_id=item["draft_id"] - 1, limit=50
+        ):
+            if previous.sender_id in (me.id, reviewer.id) and (previous.raw_text or "").strip() != "1":
+                draft = previous
+                break
+        if not draft or (not draft.raw_text and not draft.media):
+            log.warning("[SSC审批] 草稿不存在或为空，msg_id=%s", item["draft_id"])
+            return
+        text = draft.raw_text or ""
+        media = draft.media
+        if not media and draft.id != item["draft_id"]:
+            original_draft = await client.get_messages(reviewer.id, ids=item["draft_id"])
+            media = original_draft.media if original_draft else None
+        updates = dict(item["updates"])
+        if item["kind"] == "offer":
+            fields = parse_kv_fields(text)
+            org = get_field(fields, "入职编制组织", "编制组织") or offer_header_org(text)
+            if not get_field(fields, "候选人姓名") or not org:
+                log.warning("[SSC审批] 修改后的Offer缺少候选人姓名或编制组织，未发送")
+                return
+            updates.update(raw_fields=fields, org_unit=org, offer_confirm_text=text,
+                           position=get_field(fields, "职位", "应聘岗位"),
+                           salary_confirm=get_field(fields, "转正薪资"),
+                           salary_probation=get_field(fields, "试用薪资"))
+        elif item["kind"] == "onboarding":
+            # SSC修改编制组织/部门后，依最终入职确认字段重算备注名单。
+            fields = parse_kv_fields(text)
+            org = get_field(fields, "入职编制组织", "编制组织")
+            leaders = get_leader_tags(org, get_field(fields, "入职部门"))
+            if not leaders:
+                return
+            import re
+            text = re.sub(r"^[^\n]*【入职信息确认】", org + "【入职信息确认】", text, count=1)
+            text = re.sub(r"(?:\n[ \t]*)?@[A-Za-z0-9_]+(?:[ \t]+@[A-Za-z0-9_]+)*[ \t]+请知悉[ \t]*$", "", text).rstrip()
+            text += "\n\n" + " ".join("@" + u for u in leaders) + " 请知悉"
+        key = str(item["draft_id"])
+        # 先持久化发送中状态；发送结果不确定时禁止重复1盲目重发。
+        outbox.update(key, status="sending", approval_msg_id=event.message.id)
+        try:
+            sent = await client.send_message(item["destination"], text,
+                                             file=media, reply_to=item["reply_to"], parse_mode=None)
+            if item["id_field"]:
+                updates[item["id_field"]] = sent.id
+            state.update(item["candidate"], **updates)
+            outbox.update(key, status="sent", sent_msg_id=sent.id)
+            log.info("[SSC审批] 已发送至群=%s msg_id=%s", item["destination"], sent.id)
+        except Exception:
+            log.exception("[SSC审批] 发送或保存失败，草稿msg_id=%s；结果待核查，不自动重发", item["draft_id"])
+
+
 @client.on(events.NewMessage())
 async def debug_all_messages(event):
     try:
@@ -109,12 +214,6 @@ async def on_hrbp_offer(event):
     body = strip_header_footer(text)
     new_text = build_offer_confirm_message(org_unit, body)
 
-    sent = await client.send_message(
-        config.GROUP_LEADERSHIP,
-        new_text,
-        file=msg.media if msg.media else None,
-    )
-
     sender = await event.get_sender()
     hrbp_username = sender.username or str(sender.id)
 
@@ -122,15 +221,17 @@ async def on_hrbp_offer(event):
         "candidate_name": candidate_name,
         "org_unit": org_unit,
         "hrbp_username": hrbp_username,
-        "offer_confirm_msg_id": sent.id,
         "offer_confirm_text": new_text,
         "position": get_field(fields, "职位", "应聘岗位"),
         "salary_confirm": get_field(fields, "转正薪资"),
         "salary_probation": get_field(fields, "试用薪资"),
         "raw_fields": fields,
-        "stage": "sent_to_leadership",
+        "stage": "waiting_ssc_offer",
     })
-    log.info(f"[场景1] 候选人「{candidate_name}」已转发到联合管理工作群，msg_id={sent.id}")
+    await queue_group_message(config.GROUP_LEADERSHIP, new_text,
+                              candidate=candidate_name, expected_stage="waiting_ssc_offer",
+                              updates={"stage": "sent_to_leadership"},
+                              id_field="offer_confirm_msg_id", kind="offer", file=msg.media)
 
 
 # ==================== 场景二：联合管理工作群里的审批链 ====================
@@ -225,17 +326,18 @@ async def process_leadership_reply(event):
         return
     else:
         return
-    sent = await client.send_message(
+    await queue_group_message(
         config.GROUP_LEADERSHIP,
         # 固定审批提示：所有路径只按目标审批级别选择，不改写正文。
         (f"@{leader.strip().lstrip('@')} 初审已通过，请领导二级审批，谢谢"
          if next_stage == "waiting_second_review"
          else f"@{leader.strip().lstrip('@')} 初审已通过，请领导终审，谢谢"),
         reply_to=rec["offer_confirm_msg_id"],
+        candidate=name, expected_stage="waiting_ssc_" + next_stage,
+        updates={"org_unit": rec["org_unit"], "stage": next_stage}, id_field=id_field,
     )
-    state.update(name, org_unit=rec["org_unit"], stage=next_stage,
-                 last_approval_msg_id=msg.id, **{id_field: sent.id})
-    log.info("[场景2] %s 回复同意，候选人 %s 已转%s", username, name, label)
+    state.update(name, last_approval_msg_id=msg.id)
+    log.info("[场景2] %s 回复同意，候选人 %s 的%s提示等待SSC审批", username, name, label)
 
 
 def matches_recruit_candidate(text: str, candidate_name: str, candidate_code: str = "") -> bool:
@@ -283,16 +385,14 @@ async def handle_final_approved(candidate_name: str, rec: dict):
         recruiter_username=recruiter_username,
         hrbp_username=rec.get("hrbp_username", ""),
     )
-    await client.send_message(config.GROUP_RECRUIT, reply_text, reply_to=resume_msg.id)
-
-    state.update(
-        candidate_name,
-        recruiter_username=recruiter_username,
-        resume_msg_id=resume_msg.id,
-        resume_fields=parse_kv_fields(resume_msg.raw_text or ""),
-        stage="waiting_recruiter_dm",
+    await queue_group_message(
+        config.GROUP_RECRUIT, reply_text, reply_to=resume_msg.id,
+        candidate=candidate_name, expected_stage="waiting_ssc_recruit_reply",
+        updates={"recruiter_username": recruiter_username, "resume_msg_id": resume_msg.id,
+                 "resume_fields": parse_kv_fields(resume_msg.raw_text or ""),
+                 "stage": "waiting_recruiter_dm"},
     )
-    log.info(f"[场景2] 「{candidate_name}」终审通过，已在招聘群回复简历消息，等待招聘私聊补充入职信息")
+    log.info("[场景2] %s 终审通过，招聘群通知等待SSC审批", candidate_name)
 
 
 # ==================== 场景三：招聘私聊补充信息 -> 发布入职确认 ====================
@@ -330,11 +430,6 @@ async def on_private_message(event):
     merged_fields["简历来源"] = dm_fields.get("简历来源") or get_field(resume_fields, "简历推荐人") or merged_fields.get("简历来源", "")
     merged_fields["招聘通道"] = dm_fields.get("招聘通道") or get_field(resume_fields, "招聘通道", "简历来源") or merged_fields.get("招聘通道", "")
 
-    dept_text = get_field(rec.get("raw_fields", {}), "入职部门") or merged_fields.get("入职部门", "")
-    leaders = get_leader_tags(rec["org_unit"], dept_text)
-    if not leaders:
-        return
-
     # 老记录从群内取回原Offer，新记录直接使用发送时保存的正文。
     offer_text = rec.get("offer_confirm_text", "")
     if not offer_text:
@@ -343,20 +438,27 @@ async def on_private_message(event):
     if not offer_text:
         log.warning("[场景3] 原Offer消息不可用，已停止生成入职确认：%s", candidate_name)
         return
-    final_text = build_onboarding_confirm_message(rec["org_unit"], merged_fields, leaders, offer_text)
+    original_fields = parse_kv_fields(offer_text)
+    org_unit = get_field(original_fields, "入职编制组织", "编制组织") or rec["org_unit"]
+    leaders = get_leader_tags(org_unit, get_field(original_fields, "入职部门"))
+    if not leaders:
+        return
+    final_text = build_onboarding_confirm_message(org_unit, merged_fields, leaders, offer_text)
 
-    await client.send_message(
+    await queue_group_message(
         config.GROUP_LEADERSHIP,
         final_text,
         reply_to=rec["offer_confirm_msg_id"],
+        candidate=candidate_name, expected_stage="waiting_ssc_onboarding",
+        updates={"stage": "done"}, kind="onboarding",
     )
-    state.update(candidate_name, stage="done")
-    log.info(f"[场景3] 「{candidate_name}」入职信息确认已发布到联合管理工作群，流程结束")
+    log.info("[场景3] %s 入职确认等待SSC审批", candidate_name)
 
 
 async def main():
     await client.start()
     me = await client.get_me()
+    await get_ssc_reviewer()
     log.info(f"已登录账号：{me.username or me.id}")
     log.info("SSC Offer 自动化流程已启动，开始监听...")
     await client.run_until_disconnected()
