@@ -29,6 +29,7 @@ SSC Offer 审批流转自动化 主程序。
 
 import asyncio
 import logging
+import unicodedata
 
 from telethon import TelegramClient, events
 
@@ -216,7 +217,7 @@ async def process_leadership_reply(event):
         label = "二级审批" if tech else "三级审批（终审）"
     elif stage == "waiting_second_review":
         leader, next_stage, id_field, label = config.LEADER_FINAL, "waiting_final_review", "final_review_msg_id", "三级审批（终审）"
-    elif stage == "waiting_final_review":
+    elif stage in {"waiting_final_review", "final_approved_no_resume_found"}:
         await handle_final_approved(name, rec)
         state.update(name, last_approval_msg_id=msg.id)
         return
@@ -235,14 +236,33 @@ async def process_leadership_reply(event):
     log.info("[场景2] %s 回复同意，候选人 %s 已转%s", username, name, label)
 
 
+def matches_recruit_candidate(text: str, candidate_name: str, candidate_code: str = "") -> bool:
+    """招聘简历无需Offer标题；编码优先，姓名忽略空格与大小写。"""
+    def normalized(value):
+        return "".join(unicodedata.normalize("NFKC", value or "").casefold().split())
+
+    fields = parse_kv_fields(text)
+    resume_code = get_field(fields, "候选人编码")
+    resume_name = get_field(fields, "候选人姓名")
+    if candidate_code and resume_code:
+        return normalized(candidate_code) == normalized(resume_code)
+    return bool(normalized(candidate_name) and normalized(resume_name)
+                and normalized(candidate_name) == normalized(resume_name))
+
+
 async def handle_final_approved(candidate_name: str, rec: dict):
     """终审通过后：去招聘群搜同名候选人的简历消息，回复它。"""
     resume_msg = None
-    async for m in client.iter_messages(config.GROUP_RECRUIT, search=candidate_name, limit=50):
-        resume_text = m.raw_text or ""
-        if ("offer信息确认" in "".join(resume_text.casefold().split())
-                and get_field(parse_kv_fields(resume_text), "候选人姓名") == candidate_name):
-            resume_msg = m
+    candidate_code = get_field(rec.get("raw_fields", {}), "候选人编码")
+    # 编码优先；姓名搜索失败时扫描近期消息，兼容Telegram索引和空格差异。
+    searches = list(dict.fromkeys(value for value in (candidate_code, candidate_name) if value)) + [None]
+    for search in searches:
+        kwargs = {"search": search, "limit": 100} if search else {"limit": 1000}
+        async for m in client.iter_messages(config.GROUP_RECRUIT, **kwargs):
+            if matches_recruit_candidate(m.raw_text or "", candidate_name, candidate_code):
+                resume_msg = m
+                break
+        if resume_msg:
             break
 
     if not resume_msg:
