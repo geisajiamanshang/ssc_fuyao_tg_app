@@ -224,9 +224,10 @@ async def process_leadership_reply(event):
         return
     sent = await client.send_message(
         config.GROUP_LEADERSHIP,
-        (f"@{leader.strip().lstrip('@')} 初审已通过，请领导终审，谢谢"
-         if stage == "waiting_second_review"
-         else f"@{leader.strip().lstrip('@')} 初审已通过，请领导{label}，谢谢"),
+        # 固定审批提示：所有路径只按目标审批级别选择，不改写正文。
+        (f"@{leader.strip().lstrip('@')} 初审已通过，请领导二级审批，谢谢"
+         if next_stage == "waiting_second_review"
+         else f"@{leader.strip().lstrip('@')} 初审已通过，请领导终审，谢谢"),
         reply_to=rec["offer_confirm_msg_id"],
     )
     state.update(name, org_unit=rec["org_unit"], stage=next_stage,
