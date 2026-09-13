@@ -42,6 +42,17 @@ TECH_CENTER_KEYWORDS = ["技术中心"]
 # 请根据你们实际的部门架构继续增补条目。
 DEPARTMENT_LEADER_TAGS = [
     {
+        "org_unit": "技术中心",
+        "dept_keywords": ["后端组"],
+        "leaders": ["DaBai10010", "chuqianyiding", "liyuanba666", "wean4790"],
+    },
+    {
+        "org_unit": "技术中心",
+        "dept_keywords": ["前端组"],
+        "leaders": ["DaBai10010", "chuqianyiding", "wdz999", "wean4790"],
+    },
+
+    {
         "org_unit": "效能中心",
         "dept_keywords": [""],
         "leaders": ["DaBai10010", "chuqianyiding", "wean4790"],
@@ -66,7 +77,7 @@ DEPARTMENT_LEADER_TAGS = [
 
 # 如果一个候选人的部门没有匹配到上面任何规则，用这个兜底名单，
 # 并会在日志里打印警告，提醒你去补充配置。
-DEFAULT_LEADERS = ["DDbai01", "haok001"]
+DEFAULT_LEADERS = []  # 未配置的中心/部门不使用审批领导作为通知名单
 
 # ========== 本地状态文件 ==========
 DB_PATH = "offer_state.json"

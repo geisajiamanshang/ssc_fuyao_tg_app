@@ -69,17 +69,18 @@ async def debug_all_messages(event):
 
 
 def get_leader_tags(org_unit: str, dept_text: str) -> list:
-    """按部门规则找到最终【入职信息确认】要@的领导名单。"""
+    """严格按Drive步骤备注匹配入职通知领导，兼容空格和大小写。"""
+    def normalized(value):
+        return "".join(unicodedata.normalize("NFKC", value or "").casefold().split())
+
+    org, dept = normalized(org_unit), normalized(dept_text)
     for rule in config.DEPARTMENT_LEADER_TAGS:
-        if rule["org_unit"] in org_unit or org_unit in rule["org_unit"]:
-            for kw in rule["dept_keywords"]:
-                if kw in dept_text:
-                    return rule["leaders"]
-    log.warning(
-        f"未匹配到部门领导配置 (org_unit={org_unit!r}, dept_text={dept_text!r})，"
-        f"使用默认名单，请检查 config.py 里的 DEPARTMENT_LEADER_TAGS 是否需要补充"
-    )
-    return config.DEFAULT_LEADERS
+        rule_org = normalized(rule["org_unit"])
+        if org and rule_org and rule_org in org:
+            if any(normalized(kw) in dept for kw in rule["dept_keywords"]):
+                return rule["leaders"]
+    log.warning("[场景3] 步骤备注未匹配通知名单：org_unit=%r dept_text=%r，停止发送", org_unit, dept_text)
+    return []
 
 
 # ==================== 场景一：HRBP群 -> 联合管理工作群 ====================
@@ -329,8 +330,10 @@ async def on_private_message(event):
     merged_fields["简历来源"] = dm_fields.get("简历来源") or get_field(resume_fields, "简历推荐人") or merged_fields.get("简历来源", "")
     merged_fields["招聘通道"] = dm_fields.get("招聘通道") or get_field(resume_fields, "招聘通道", "简历来源") or merged_fields.get("招聘通道", "")
 
-    dept_text = merged_fields.get("入职部门", "") or merged_fields.get("编制组织", "")
+    dept_text = get_field(rec.get("raw_fields", {}), "入职部门") or merged_fields.get("入职部门", "")
     leaders = get_leader_tags(rec["org_unit"], dept_text)
+    if not leaders:
+        return
 
     # 老记录从群内取回原Offer，新记录直接使用发送时保存的正文。
     offer_text = rec.get("offer_confirm_text", "")
