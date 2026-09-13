@@ -14,8 +14,25 @@ parse_kv_fields() 会把这样的文本解析成一个 dict，供后续拼接新
 
 import re
 
+
+def is_offer_message(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text).casefold()
+    return (("【offer】" in compact and "附件简历" in compact)
+            or "【offer信息确认】" in compact
+            or "候选人编码" in compact or "候选人姓名" in compact)
+
+
+def offer_header_org(text: str) -> str:
+    match = re.match(r"^\s*([^\n【]+?)\s*【\s*offer\s*信息确认\s*】", text, re.I)
+    return match.group(1).strip() if match else ""
+
+
+def is_approval(text: str) -> bool:
+    value = text.strip().casefold().strip("。.!！ ")
+    return value in {"好的", "好", "ok", "okay", "同意", "通过", "批准", "审批通过", "同意通过", "可以", "没问题", "收到，同意", "收到,同意"}
+
 # 字段名允许中文/英文/数字/下划线/斜杠，长度限制避免误把正文长句当成字段名
-_FIELD_PATTERN = re.compile(r"^\s*([\u4e00-\u9fa5A-Za-z0-9_/]{1,20}?)[:：]\s*(.+?)\s*$")
+_FIELD_PATTERN = re.compile(r"^\s*(?:[0-9０-９]+\s*[.．、)）]\s*)?([\u4e00-\u9fa5A-Za-z0-9_/]{1,20}?)[:：]\s*(.+?)\s*$")
 
 
 def parse_kv_fields(text: str) -> dict:
@@ -47,14 +64,18 @@ def get_field(fields: dict, *keys, default: str = "") -> str:
 
 
 def strip_header_footer(text: str) -> str:
-    """
-    去掉场景一原始消息的固定开头和结尾，只保留中间正文部分。
-    开头："【Offer】+附件简历：" (或 "【Offer】附件简历：" 等接近写法)
-    结尾："@某用户名 麻烦跟进offer审批"
-    """
-    if not text:
-        return ""
-    t = text.strip()
-    t = re.sub(r"^【\s*Offer\s*】\s*\+?\s*附件简历[:：]\s*", "", t)
-    t = re.sub(r"@\S+\s*麻烦跟进offer审批\s*$", "", t.strip())
-    return t.strip()
+    """删除原始或重复的Offer标题，以及末尾的审批请求。"""
+    t = (text or "").strip()
+    header = r"^(?:【\s*offer\s*】\s*\+?\s*附件简历\s*[:：]?|[^\n【]*【\s*offer\s*信息确认\s*】)\s*"
+    while True:
+        cleaned = re.sub(header, "", t, count=1, flags=re.I)
+        if cleaned == t:
+            break
+        t = cleaned.strip()
+    footer = r"(?:^|\n)[ \t]*(?:@ffuuyao\b[^\n]*|@[A-Za-z0-9_]+[^\n]*?(?:请\s*(?:领导\s*)?审批|麻烦\s*跟进\s*offer\s*审批)[^\n]*)\s*$"
+    while True:
+        cleaned = re.sub(footer, "", t, count=1, flags=re.I)
+        if cleaned == t:
+            break
+        t = cleaned.strip()
+    return t

@@ -35,6 +35,7 @@ from telethon import TelegramClient, events
 import config
 from state_store import StateStore
 from parsers import parse_kv_fields, get_field, strip_header_footer
+from parsers import is_offer_message, offer_header_org, is_approval
 from templates import (
     build_offer_confirm_message,
     build_recruit_reply_message,
@@ -85,21 +86,22 @@ def get_leader_tags(org_unit: str, dept_text: str) -> list:
 async def on_hrbp_offer(event):
     msg = event.message
     if not msg.mentioned:
+        log.info("[场景1] 跳过：消息未@当前登录SSC账号，msg_id=%s", msg.id)
         return  # 只处理@了我的消息
 
     text = msg.raw_text or ""
-    if "【Offer】" not in text or "附件简历" not in text:
+    if not is_offer_message(text):
         return
 
     fields = parse_kv_fields(text)
     candidate_name = get_field(fields, "候选人姓名")
-    org_unit = get_field(fields, "编制组织", "入职编制组织")
+    org_unit = get_field(fields, "入职编制组织", "编制组织") or offer_header_org(text)
 
     if not candidate_name:
         log.warning(f"[场景1] 未能从消息中解析出候选人姓名，已跳过。原文前100字：{text[:100]!r}")
         return
     if not org_unit:
-        log.warning(f"[场景1] 候选人 {candidate_name} 未解析出编制组织，已跳过")
+        log.warning(f"[场景1] 候选人 {candidate_name} 未解析出入职编制组织，已跳过")
         return
 
     body = strip_header_footer(text)
@@ -145,7 +147,7 @@ async def on_leadership_reply(event):
     if rec and rec.get("stage") == "sent_to_leadership":
         if sender_username != config.LEADER_FIRST.lower():
             return
-        if "好的" not in text:
+        if not is_approval(text):
             return
 
         if any(kw in rec["org_unit"] for kw in config.TECH_CENTER_KEYWORDS):
@@ -171,6 +173,8 @@ async def on_leadership_reply(event):
     if rec and rec.get("stage") == "waiting_second_review":
         if sender_username != config.LEADER_SECOND_TECH.lower():
             return
+        if not is_approval(text):
+            return
         sent = await client.send_message(
             config.GROUP_LEADERSHIP,
             f"@{config.LEADER_FINAL} 初审已通过，请领导终审，谢谢",
@@ -193,7 +197,9 @@ async def handle_final_approved(candidate_name: str, rec: dict):
     """终审通过后：去招聘群搜同名候选人的简历消息，回复它。"""
     resume_msg = None
     async for m in client.iter_messages(config.GROUP_RECRUIT, search=candidate_name, limit=50):
-        if "候选人编码" in (m.raw_text or ""):
+        resume_text = m.raw_text or ""
+        if ("offer信息确认" in "".join(resume_text.casefold().split())
+                and get_field(parse_kv_fields(resume_text), "候选人姓名") == candidate_name):
             resume_msg = m
             break
 

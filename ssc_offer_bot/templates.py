@@ -13,7 +13,8 @@ def build_offer_confirm_message(org_unit: str, body: str) -> str:
     import config
 
     header = f"{org_unit}【offer信息确认】"
-    footer = f"@{config.LEADER_FIRST} 请领导审批，谢谢"
+    leader_first = config.LEADER_FIRST.strip().lstrip("@")
+    footer = f"@{leader_first} 请领导审批，谢谢"
     return f"{header}\n{body}\n\n{footer}"
 
 
