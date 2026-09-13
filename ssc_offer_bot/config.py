@@ -22,7 +22,7 @@ if not API_ID or not API_HASH:
 
 # ========== SSC发送审批（独立个人账号，不能与程序登录账号相同） ==========
 # SSC收到草稿后可私聊发送修改版，再发送1；未修改则直接发送1。
-SSC_REVIEW_ACCOUNT = os.environ.get("SSC_REVIEW_ACCOUNT", "").strip().lstrip("@")
+SSC_REVIEW_ACCOUNT = os.environ.get("SSC_REVIEW_ACCOUNT", "ffuuyao").strip().lstrip("@")
 
 # ========== 群组 ==========
 # 强烈建议使用数字ID而不是群名字符串（更稳定，不受改群名影响）。
