@@ -60,19 +60,13 @@ ssc_send_lock = asyncio.Lock()
 
 
 async def get_ssc_reviewer():
-    account = getattr(config, "SSC_REVIEW_ACCOUNT", "")
-    if not account:
-        raise RuntimeError("未配置SSC审批私聊账号：SSC_REVIEW_ACCOUNT")
-    reviewer = await client.get_entity(account)
-    me = await client.get_me()
-    if reviewer.id == me.id or getattr(reviewer, "bot", False):
-        raise RuntimeError("SSC审批收件人必须是独立个人账号，不能是程序登录账号或机器人")
-    return reviewer
+    """统一使用登录账号的收藏夹，不按环境或SSC用户名另选收件人。"""
+    return await client.get_me()
 
 
 async def queue_group_message(destination, text, *, candidate, expected_stage,
                               updates, id_field=None, kind="message", reply_to=None, file=None):
-    """所有群消息统一先送SSC账号私聊；只有SSC的1能触发群内发送。"""
+    """所有群消息统一先送收藏夹，仅登录SSC账号在收藏夹发送1可放行。"""
     async with ssc_send_lock:
         reviewer = await get_ssc_reviewer()
         draft = await client.send_message(reviewer.id, text, file=file, parse_mode=None)
@@ -83,10 +77,10 @@ async def queue_group_message(destination, text, *, candidate, expected_stage,
             "review_chat_id": reviewer.id,
         })
         state.update(candidate, stage=expected_stage)
-        log.info("[SSC审批] 草稿msg_id=%s，目标群=%s，等待SSC私聊发送1", draft.id, destination)
+        log.info("[SSC审批] 草稿msg_id=%s，目标群=%s，等待SSC在接收草稿的会话发送1", draft.id, destination)
 
 
-@client.on(events.NewMessage(incoming=True))
+@client.on(events.NewMessage())
 async def on_ssc_send_approval(event):
     if (event.raw_text or "").strip() != "1":
         return
@@ -107,7 +101,7 @@ async def on_ssc_send_approval(event):
         if not rec or rec.get("stage") != item["expected_stage"]:
             log.warning("[SSC审批] 草稿状态已失效，msg_id=%s", item["draft_id"])
             return
-        # SSC在私聊发送修改版正文后再发送1；未修改则发送原草稿。
+        # SSC可编辑收藏夹草稿，或发送修改版正文后再发送1；未修改则用原草稿。
         draft = None
         async for previous in client.iter_messages(
             reviewer.id, max_id=event.message.id, min_id=item["draft_id"] - 1, limit=50
