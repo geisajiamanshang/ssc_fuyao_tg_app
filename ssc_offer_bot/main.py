@@ -224,7 +224,7 @@ async def process_leadership_reply(event):
         return
     sent = await client.send_message(
         config.GROUP_LEADERSHIP,
-        (f"@{leader.strip().lstrip('@')}， 初审已通过，请领导终审，谢谢"
+        (f"@{leader.strip().lstrip('@')} 初审已通过，请领导终审，谢谢"
          if stage == "waiting_second_review"
          else f"@{leader.strip().lstrip('@')} 初审已通过，请领导{label}，谢谢"),
         reply_to=rec["offer_confirm_msg_id"],
