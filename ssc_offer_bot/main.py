@@ -57,6 +57,43 @@ client = TelegramClient(config.SESSION_NAME, config.API_ID, config.API_HASH)
 state = StateStore(config.DB_PATH)
 outbox = StateStore(config.DB_PATH + ".outbox.json")
 ssc_send_lock = asyncio.Lock()
+hrgs_forwards = StateStore(config.DB_PATH + ".hrgs_forward.json")
+hrgs_forward_lock = asyncio.Lock()
+HRGS_BOT_USERNAME = "HRGS_ssc_bot"
+
+
+async def forward_onboarding_to_hrgs(message, chat_id):
+    """仅转发SSC已经发布到联合管理群的入职确认，保留原消息和附件。"""
+    if chat_id != config.GROUP_LEADERSHIP:
+        return
+    compact = "".join((message.raw_text or "").split())
+    if "入职信息确认" not in compact:
+        return
+    me = await client.get_me()
+    if message.sender_id != me.id:
+        return
+    key = f"{chat_id}:{message.id}"
+    async with hrgs_forward_lock:
+        if hrgs_forwards.get(key):
+            return
+        try:
+            recipient = await client.get_entity(HRGS_BOT_USERNAME)
+            if (not getattr(recipient, "bot", False)
+                    or (getattr(recipient, "username", "") or "").casefold() != HRGS_BOT_USERNAME.casefold()):
+                log.error("[HRGS转发] 收件人不是指定机器人，停止转发")
+                return
+            # 在网络请求前记录；并发监听和直接发送回调不会重复转发。
+            hrgs_forwards.set(key, {"status": "forwarding", "source_msg_id": message.id})
+            forwarded = await client.forward_messages(recipient, message.id, from_peer=chat_id)
+            hrgs_forwards.update(key, status="forwarded", forwarded_msg_id=forwarded.id)
+            log.info("[HRGS转发] 入职确认msg_id=%s 已转发给@%s", message.id, HRGS_BOT_USERNAME)
+        except Exception:
+            log.exception("[HRGS转发] msg_id=%s 转发失败；已发起的请求结果需核查，避免重复转发", message.id)
+
+
+@client.on(events.NewMessage(chats=config.GROUP_LEADERSHIP, outgoing=True))
+async def on_ssc_onboarding_published(event):
+    await forward_onboarding_to_hrgs(event.message, event.chat_id)
 
 
 async def get_ssc_reviewer():
@@ -150,6 +187,8 @@ async def on_ssc_send_approval(event):
             state.update(item["candidate"], **updates)
             outbox.update(key, status="sent", sent_msg_id=sent.id)
             log.info("[SSC审批] 已发送至群=%s msg_id=%s", item["destination"], sent.id)
+            # 主动覆盖程序发布的消息；同一消息的监听回调由持久化记录去重。
+            await forward_onboarding_to_hrgs(sent, item["destination"])
         except Exception:
             log.exception("[SSC审批] 发送或保存失败，草稿msg_id=%s；结果待核查，不自动重发", item["draft_id"])
 
