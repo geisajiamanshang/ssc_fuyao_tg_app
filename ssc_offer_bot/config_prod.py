@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-配置文件。所有需要按实际情况修改的内容都集中在这里。
+生产环境配置。群组、审批链和通知名单与当前生产流程保持一致。
 """
 
 import os
@@ -20,17 +20,20 @@ if not API_ID or not API_HASH:
         "未找到 TG_API_ID / TG_API_HASH，请复制 .env.example 为 .env 并填入真实值"
     )
 
+# ========== SSC发送审批 ==========
+# 所有环境统一使用当前登录账号的收藏夹，发送1才放行最近消息。
+
 # ========== 群组 ==========
 # 强烈建议使用数字ID而不是群名字符串（更稳定，不受改群名影响）。
 # 获取方式：先用 list_chats.py 跑一遍，把打印出来的 ID 复制过来替换下面的值。
-GROUP_HRBP = -5447064641          # 场景一：来源群，HRBP在这里@你发offer消息
-GROUP_LEADERSHIP = -5365249364   # 场景二/三：审批流转 + 最终入职确认发布的群
-GROUP_RECRUIT = -5577108580           # 场景二：简历 & 最终"请招聘私聊我"消息所在群
+GROUP_HRBP = -1003559652510         # 场景一：来源群，HRBP在这里@你发offer消息
+GROUP_LEADERSHIP = -1003865890708   # 场景二/三：审批流转 + 最终入职确认发布的群
+GROUP_RECRUIT = -1004380831613      # 场景二：简历 & 最终"请招聘私聊我"消息所在群
 
 # ========== 审批链角色（填 Telegram 用户名，不带 @） ==========
-LEADER_FIRST = "ffuuyao"        # 一级审批：白一舟，收到"好的"作为一级通过标志
+LEADER_FIRST = "DaBai10010"        # 一级审批：白一舟，收到"好的"作为一级通过标志
 LEADER_SECOND_TECH = "hk88mc996"   # 技术中心专属二级审批人
-LEADER_FINAL = "Zoey95274"     # 终审人（所有部门最终都要走到这一步）
+LEADER_FINAL = "chuqianyiding"     # 终审人（所有部门最终都要走到这一步）
 
 # 判断"编制组织"是否属于技术中心（需要走二级审批）的关键词
 TECH_CENTER_KEYWORDS = ["技术中心"]
@@ -41,6 +44,22 @@ TECH_CENTER_KEYWORDS = ["技术中心"]
 # 命中第一条规则就用它的 leaders 名单。
 # 请根据你们实际的部门架构继续增补条目。
 DEPARTMENT_LEADER_TAGS = [
+    {
+        "org_unit": "技术中心",
+        "dept_keywords": ["后端组"],
+        "leaders": ["DaBai10010", "chuqianyiding", "liyuanba666", "wean4790"],
+    },
+    {
+        "org_unit": "技术中心",
+        "dept_keywords": ["前端组"],
+        "leaders": ["DaBai10010", "chuqianyiding", "wdz999", "wean4790"],
+    },
+
+    {
+        "org_unit": "效能中心",
+        "dept_keywords": [""],
+        "leaders": ["DaBai10010", "chuqianyiding", "wean4790"],
+    },
     {
         "org_unit": "运营中心",
         "dept_keywords": ["运营1部"],
@@ -61,7 +80,7 @@ DEPARTMENT_LEADER_TAGS = [
 
 # 如果一个候选人的部门没有匹配到上面任何规则，用这个兜底名单，
 # 并会在日志里打印警告，提醒你去补充配置。
-DEFAULT_LEADERS = ["DaBai10010", "chuqianyiding"]
+DEFAULT_LEADERS = []  # 未配置的中心/部门不使用审批领导作为通知名单
 
 # ========== 本地状态文件 ==========
 DB_PATH = "offer_state.json"
