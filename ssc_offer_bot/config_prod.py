@@ -82,8 +82,17 @@ DEPARTMENT_LEADER_TAGS = [
 # 并会在日志里打印警告，提醒你去补充配置。
 DEFAULT_LEADERS = []  # 未配置的中心/部门不使用审批领导作为通知名单
 
+# ========== 每日人事信息数据同步 ==========
+DAILY_REPORT_FOLDER_ID = os.environ.get(
+    "DAILY_REPORT_FOLDER_ID", "15Jrw7hl6erl2BFDwkqg5gEj_bOLA1dDk"
+)
+DAILY_REPORT_RECIPIENT = os.environ.get("DAILY_REPORT_RECIPIENT", "oiyr90557")
+DAILY_REPORT_TIMEZONE = os.environ.get("DAILY_REPORT_TIMEZONE", "Asia/Shanghai")
+DAILY_REPORT_POLL_SECONDS = int(os.environ.get("DAILY_REPORT_POLL_SECONDS", "300"))
+
 # ========== 本地状态文件 ==========
 DB_PATH = "offer_state.json"
+DAILY_REPORT_STATE_PATH = DB_PATH + ".daily_reports.json"
 
 # ========== 日志文件 ==========
 LOG_PATH = "bot.log"

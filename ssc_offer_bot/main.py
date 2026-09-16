@@ -42,6 +42,7 @@ from templates import (
     build_recruit_reply_message,
     build_onboarding_confirm_message,
 )
+from daily_reports import DailyReportSender
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,6 +61,7 @@ ssc_send_lock = asyncio.Lock()
 hrgs_forwards = StateStore(config.DB_PATH + ".hrgs_forward.json")
 hrgs_forward_lock = asyncio.Lock()
 HRGS_BOT_USERNAME = "HRGS_ssc_bot"
+daily_report_state = StateStore(config.DAILY_REPORT_STATE_PATH)
 
 
 async def forward_onboarding_to_hrgs(message, chat_id):
@@ -492,9 +494,22 @@ async def main():
     await client.start()
     me = await client.get_me()
     await get_ssc_reviewer()
+    daily_report_sender = DailyReportSender(
+        client,
+        daily_report_state,
+        folder_id=config.DAILY_REPORT_FOLDER_ID,
+        recipient_username=config.DAILY_REPORT_RECIPIENT,
+        timezone=config.DAILY_REPORT_TIMEZONE,
+        poll_seconds=config.DAILY_REPORT_POLL_SECONDS,
+    )
+    daily_report_task = asyncio.create_task(daily_report_sender.run())
     log.info(f"已登录账号：{me.username or me.id}")
     log.info("SSC Offer 自动化流程已启动，开始监听...")
-    await client.run_until_disconnected()
+    try:
+        await client.run_until_disconnected()
+    finally:
+        daily_report_task.cancel()
+        await asyncio.gather(daily_report_task, return_exceptions=True)
 
 
 if __name__ == "__main__":
