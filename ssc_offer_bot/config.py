@@ -29,6 +29,9 @@ if not API_ID or not API_HASH:
 GROUP_HRBP = -1003559652510         # 场景一：来源群，HRBP在这里@你发offer消息
 GROUP_LEADERSHIP = -1003865890708   # 场景二/三：审批流转 + 最终入职确认发布的群
 GROUP_RECRUIT = -1004380831613      # 场景二：简历 & 最终"请招聘私聊我"消息所在群
+GROUP_REGULARIZATION_TRIGGER = int(os.environ.get(
+    "GROUP_REGULARIZATION_TRIGGER", "-1004492520637"
+))
 
 # ========== 审批链角色（填 Telegram 用户名，不带 @） ==========
 LEADER_FIRST = "DaBai10010"        # 一级审批：白一舟，收到"好的"作为一级通过标志
@@ -90,9 +93,19 @@ DAILY_REPORT_RECIPIENT = os.environ.get("DAILY_REPORT_RECIPIENT", "oiyr90557")
 DAILY_REPORT_TIMEZONE = os.environ.get("DAILY_REPORT_TIMEZONE", "Asia/Shanghai")
 DAILY_REPORT_POLL_SECONDS = int(os.environ.get("DAILY_REPORT_POLL_SECONDS", "300"))
 
+# ========== 转正倒数4天提醒 ==========
+REGULARIZATION_TRIGGER_BOT_ID = int(os.environ.get(
+    "REGULARIZATION_TRIGGER_BOT_ID", "8416618309"
+))
+REGULARIZATION_TRIGGER_KEYWORD = "转正提醒-恒睿-转正倒数4天"
+REGULARIZATION_OUTPUT_FOLDER_ID = os.environ.get(
+    "REGULARIZATION_OUTPUT_FOLDER_ID", "17QEQ5Q1Nyfp1asMiXZYt-4vd4UDHVxAg"
+)
+
 # ========== 本地状态文件 ==========
 DB_PATH = "offer_state.json"
 DAILY_REPORT_STATE_PATH = DB_PATH + ".daily_reports.json"
+REGULARIZATION_STATE_PATH = DB_PATH + ".regularization.json"
 
 # ========== 日志文件 ==========
 LOG_PATH = "bot.log"

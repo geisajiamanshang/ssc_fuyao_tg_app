@@ -43,6 +43,7 @@ from templates import (
     build_onboarding_confirm_message,
 )
 from daily_reports import DailyReportSender
+from regularization import RegularizationDriveRepository, build_regularization_messages
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,6 +63,11 @@ hrgs_forwards = StateStore(config.DB_PATH + ".hrgs_forward.json")
 hrgs_forward_lock = asyncio.Lock()
 HRGS_BOT_USERNAME = "HRGS_ssc_bot"
 daily_report_state = StateStore(config.DAILY_REPORT_STATE_PATH)
+regularization_events = StateStore(config.REGULARIZATION_STATE_PATH)
+regularization_lock = asyncio.Lock()
+regularization_drive = RegularizationDriveRepository(
+    config.REGULARIZATION_OUTPUT_FOLDER_ID
+)
 
 
 async def forward_onboarding_to_hrgs(message, chat_id):
@@ -104,8 +110,9 @@ async def get_ssc_reviewer():
 
 
 async def queue_group_message(destination, text, *, candidate, expected_stage,
-                              updates, id_field=None, kind="message", reply_to=None, file=None):
-    """所有群消息统一先送收藏夹，仅登录SSC账号在收藏夹发送1可放行。"""
+                              updates, id_field=None, kind="message", reply_to=None,
+                              file=None, approval_code="1"):
+    """所有群消息统一先送收藏夹，由该类消息的审批码放行。"""
     async with ssc_send_lock:
         reviewer = await get_ssc_reviewer()
         draft = await client.send_message(reviewer.id, text, file=file, parse_mode=None)
@@ -113,24 +120,32 @@ async def queue_group_message(destination, text, *, candidate, expected_stage,
             "draft_id": draft.id, "destination": destination, "reply_to": reply_to,
             "candidate": candidate, "expected_stage": expected_stage,
             "updates": updates, "id_field": id_field, "kind": kind, "status": "pending",
-            "review_chat_id": reviewer.id,
+            "review_chat_id": reviewer.id, "approval_code": str(approval_code),
         })
         state.update(candidate, stage=expected_stage)
-        log.info("[SSC审批] 草稿msg_id=%s，目标群=%s，等待SSC在接收草稿的会话发送1", draft.id, destination)
+        log.info(
+            "[SSC审批] 草稿msg_id=%s，目标群=%s，等待SSC在接收草稿的会话发送%s",
+            draft.id, destination, approval_code,
+        )
+        return draft
 
 
 @client.on(events.NewMessage())
 async def on_ssc_send_approval(event):
-    if (event.raw_text or "").strip() != "1":
+    approval_code = (event.raw_text or "").strip()
+    if approval_code not in {"1", "2"}:
         return
     me = await client.get_me()
     reviewer = await get_ssc_reviewer()
     if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
         return
     async with ssc_send_lock:
-        # 仅处理最近草稿，重复1不会转而发送更早的草稿。
-        eligible = [r for r in outbox.all().values()
-                    if r["draft_id"] < event.message.id and r.get("review_chat_id") == reviewer.id]
+        # 仅处理同审批码的最近草稿，重复审批码不会转而发送更早的草稿。
+        all_outbox_items = list(outbox.all().values())
+        eligible = [r for r in all_outbox_items
+                    if r["draft_id"] < event.message.id
+                    and r.get("review_chat_id") == reviewer.id
+                    and str(r.get("approval_code", "1")) == approval_code]
         if not eligible:
             return
         item = max(eligible, key=lambda r: r["draft_id"])
@@ -140,12 +155,20 @@ async def on_ssc_send_approval(event):
         if not rec or rec.get("stage") != item["expected_stage"]:
             log.warning("[SSC审批] 草稿状态已失效，msg_id=%s", item["draft_id"])
             return
-        # SSC可编辑收藏夹草稿，或发送修改版正文后再发送1；未修改则用原草稿。
+        # SSC可编辑收藏夹草稿，或发送修改版正文后再发送对应审批码；未修改则用原草稿。
         draft = None
+        later_draft_ids = [
+            record["draft_id"] for record in all_outbox_items
+            if item["draft_id"] < record["draft_id"] < event.message.id
+        ]
+        # 若之后又产生另一类草稿，只在本草稿自己的区间内查找修改版，避免1/2串单。
+        search_max_id = min(later_draft_ids) if later_draft_ids else event.message.id
         async for previous in client.iter_messages(
-            reviewer.id, max_id=event.message.id, min_id=item["draft_id"] - 1, limit=50
+            reviewer.id, max_id=search_max_id,
+            min_id=item["draft_id"] - 1, limit=50
         ):
-            if previous.sender_id in (me.id, reviewer.id) and (previous.raw_text or "").strip() != "1":
+            if (previous.sender_id in (me.id, reviewer.id)
+                    and (previous.raw_text or "").strip() not in {"1", "2"}):
                 draft = previous
                 break
         if not draft or (not draft.raw_text and not draft.media):
@@ -193,6 +216,106 @@ async def on_ssc_send_approval(event):
             await forward_onboarding_to_hrgs(sent, item["destination"])
         except Exception:
             log.exception("[SSC审批] 发送或保存失败，草稿msg_id=%s；结果待核查，不自动重发", item["draft_id"])
+
+
+async def _send_saved_text(reviewer_id, text):
+    """将参考资料按 Telegram 文本长度拆分后发送到收藏夹。"""
+    remaining = (text or "").strip()
+    while remaining:
+        if len(remaining) <= 3900:
+            chunk, remaining = remaining, ""
+        else:
+            cut = remaining.rfind("\n", 0, 3900)
+            cut = cut if cut >= 1000 else 3900
+            chunk, remaining = remaining[:cut].rstrip(), remaining[cut:].lstrip()
+        await client.send_message(reviewer_id, chunk, parse_mode=None)
+
+
+@client.on(events.NewMessage(chats=config.GROUP_REGULARIZATION_TRIGGER))
+async def on_regularization_trigger(event):
+    text = event.raw_text or ""
+    if event.sender_id != config.REGULARIZATION_TRIGGER_BOT_ID:
+        return
+    if config.REGULARIZATION_TRIGGER_KEYWORD not in unicodedata.normalize("NFKC", text):
+        return
+
+    event_key = f"{event.chat_id}:{event.message.id}"
+    async with regularization_lock:
+        previous = regularization_events.get(event_key)
+        if previous and previous.get("status") in {"processing", "queued"}:
+            return
+        regularization_events.set(event_key, {"status": "processing"})
+        reviewer = await get_ssc_reviewer()
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date()
+            monthly_text, source_file = await asyncio.to_thread(
+                regularization_drive.load_month, today
+            )
+            names, messages = build_regularization_messages(monthly_text, text)
+            if not names:
+                await client.send_message(
+                    reviewer.id,
+                    "转正提醒处理失败：在当月转正信息中未匹配到提醒消息里的花名。",
+                    parse_mode=None,
+                )
+                regularization_events.set(event_key, {
+                    "status": "failed", "reason": "names_not_found",
+                    "source_file_id": source_file.get("id"),
+                })
+                return
+
+            # 参考信息先发；预转正提醒最后入审批队列，确保它是收藏夹中最近的草稿。
+            missing = []
+            for section_name in ("转正通知", "转正信息同步", "转正申请"):
+                section_text = messages.get(section_name, "")
+                if section_text:
+                    await _send_saved_text(reviewer.id, section_text)
+                else:
+                    missing.append(section_name)
+            if missing:
+                await client.send_message(
+                    reviewer.id,
+                    "转正资料提示：未找到「" + "、".join(missing) + "」对应内容。",
+                    parse_mode=None,
+                )
+
+            reminder = messages.get("预转正提醒", "")
+            if not reminder:
+                raise RuntimeError("当月转正信息中未找到对应预转正提醒")
+            if len(reminder) > 4096:
+                raise RuntimeError("预转正提醒超过 Telegram 单条消息长度，无法进入单条审批")
+
+            candidate_key = f"regularization:{event_key}"
+            draft = await queue_group_message(
+                config.GROUP_LEADERSHIP,
+                reminder,
+                candidate=candidate_key,
+                expected_stage="waiting_ssc_regularization",
+                updates={"stage": "regularization_sent", "names": names},
+                kind="message",
+                approval_code="2",
+            )
+            regularization_events.set(event_key, {
+                "status": "queued", "names": names, "draft_id": draft.id,
+                "source_file_id": source_file.get("id"),
+            })
+            log.info(
+                "[转正提醒] %s 的资料已发送收藏夹；草稿msg_id=%s，等待SSC发送2",
+                "、".join(names), draft.id,
+            )
+        except Exception as exc:
+            regularization_events.set(event_key, {
+                "status": "failed", "reason": str(exc)[:500],
+            })
+            log.exception("[转正提醒] msg_id=%s 处理失败", event.message.id)
+            await client.send_message(
+                reviewer.id,
+                "转正提醒处理失败，请查看机器人日志。错误：" + str(exc)[:300],
+                parse_mode=None,
+            )
 
 
 @client.on(events.NewMessage())
