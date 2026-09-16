@@ -44,6 +44,7 @@ from templates import (
 )
 from daily_reports import DailyReportSender
 from regularization import RegularizationDriveRepository, build_regularization_messages
+from anniversary import AnniversaryDriveRepository, anniversary_destination
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,6 +68,11 @@ regularization_events = StateStore(config.REGULARIZATION_STATE_PATH)
 regularization_lock = asyncio.Lock()
 regularization_drive = RegularizationDriveRepository(
     config.REGULARIZATION_OUTPUT_FOLDER_ID
+)
+anniversary_events = StateStore(config.ANNIVERSARY_STATE_PATH)
+anniversary_lock = asyncio.Lock()
+anniversary_drive = AnniversaryDriveRepository(
+    config.ANNIVERSARY_DRIVE_ROOT_ID, config.ANNIVERSARY_DRIVE_PATH
 )
 
 
@@ -133,7 +139,7 @@ async def queue_group_message(destination, text, *, candidate, expected_stage,
 @client.on(events.NewMessage())
 async def on_ssc_send_approval(event):
     approval_code = (event.raw_text or "").strip()
-    if approval_code not in {"1", "2"}:
+    if approval_code not in {"1", "2", "3"}:
         return
     me = await client.get_me()
     reviewer = await get_ssc_reviewer()
@@ -168,7 +174,7 @@ async def on_ssc_send_approval(event):
             min_id=item["draft_id"] - 1, limit=50
         ):
             if (previous.sender_id in (me.id, reviewer.id)
-                    and (previous.raw_text or "").strip() not in {"1", "2"}):
+                    and (previous.raw_text or "").strip() not in {"1", "2", "3"}):
                 draft = previous
                 break
         if not draft or (not draft.raw_text and not draft.media):
@@ -314,6 +320,74 @@ async def on_regularization_trigger(event):
             await client.send_message(
                 reviewer.id,
                 "转正提醒处理失败，请查看机器人日志。错误：" + str(exc)[:300],
+                parse_mode=None,
+            )
+
+
+@client.on(events.NewMessage(chats=config.GROUP_ANNIVERSARY_TRIGGER))
+async def on_anniversary_trigger(event):
+    text = event.raw_text or ""
+    normalized = unicodedata.normalize("NFKC", text)
+    if event.sender_id != config.ANNIVERSARY_TRIGGER_BOT_ID:
+        return
+    if not all(keyword in normalized for keyword in config.ANNIVERSARY_TRIGGER_KEYWORDS):
+        return
+
+    event_key = f"{event.chat_id}:{event.message.id}"
+    async with anniversary_lock:
+        previous = anniversary_events.get(event_key)
+        if previous and previous.get("status") in {"processing", "queued"}:
+            return
+        anniversary_events.set(event_key, {"status": "processing"})
+        reviewer = await get_ssc_reviewer()
+        try:
+            destination, fields = anniversary_destination(
+                normalized, config.ANNIVERSARY_GROUP_RULES
+            )
+            if not destination:
+                raise LookupError(
+                    "无法根据编制组织和部门匹配周年全员群："
+                    f"编制组织={fields['org_unit'] or '未填写'}，"
+                    f"部门={fields['department'] or '未填写'}"
+                )
+
+            people, info_file = await asyncio.to_thread(
+                anniversary_drive.load, normalized
+            )
+            drafts = []
+            for person in people:
+                # 带海报发送时文字是图片说明，Telegram 上限低于纯文本消息。
+                if len(person["greeting"]) > 1000:
+                    raise RuntimeError(f"{person['name']}的周年祝贺超过海报说明长度")
+                candidate_key = f"anniversary:{event_key}:{person['name']}"
+                draft = await queue_group_message(
+                    destination,
+                    person["greeting"],
+                    file=person["poster"],
+                    candidate=candidate_key,
+                    expected_stage="waiting_ssc_anniversary",
+                    updates={"stage": "anniversary_sent", "name": person["name"]},
+                    kind="message",
+                    approval_code="3",
+                )
+                drafts.append({"name": person["name"], "draft_id": draft.id})
+
+            anniversary_events.set(event_key, {
+                "status": "queued", "drafts": drafts, "destination": destination,
+                "info_file_id": info_file.get("id"),
+            })
+            log.info(
+                "[周年提醒] %s 的海报和祝贺已发送收藏夹，等待SSC发送3",
+                "、".join(item["name"] for item in people),
+            )
+        except Exception as exc:
+            anniversary_events.set(event_key, {
+                "status": "failed", "reason": str(exc)[:500],
+            })
+            log.exception("[周年提醒] msg_id=%s 处理失败", event.message.id)
+            await client.send_message(
+                reviewer.id,
+                "入职周年提醒处理失败，未发送到全员群。错误：" + str(exc)[:300],
                 parse_mode=None,
             )
 

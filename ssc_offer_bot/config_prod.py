@@ -21,7 +21,7 @@ if not API_ID or not API_HASH:
     )
 
 # ========== SSC发送审批 ==========
-# 所有环境统一使用当前登录账号的收藏夹，发送1才放行最近消息。
+# 所有环境统一使用当前登录账号的收藏夹：Offer用1，转正用2，周年用3。
 
 # ========== 群组 ==========
 # 强烈建议使用数字ID而不是群名字符串（更稳定，不受改群名影响）。
@@ -32,6 +32,7 @@ GROUP_RECRUIT = -1004380831613      # 场景二：简历 & 最终"请招聘私�
 GROUP_REGULARIZATION_TRIGGER = int(os.environ.get(
     "GROUP_REGULARIZATION_TRIGGER", "-1004492520637"
 ))
+GROUP_ANNIVERSARY_TRIGGER = GROUP_REGULARIZATION_TRIGGER
 
 # ========== 审批链角色（填 Telegram 用户名，不带 @） ==========
 LEADER_FIRST = "DaBai10010"        # 一级审批：白一舟，收到"好的"作为一级通过标志
@@ -102,10 +103,26 @@ REGULARIZATION_OUTPUT_FOLDER_ID = os.environ.get(
     "REGULARIZATION_OUTPUT_FOLDER_ID", "17QEQ5Q1Nyfp1asMiXZYt-4vd4UDHVxAg"
 )
 
+# ========== 入职周年提醒 ==========
+ANNIVERSARY_TRIGGER_BOT_ID = REGULARIZATION_TRIGGER_BOT_ID
+ANNIVERSARY_TRIGGER_KEYWORDS = ("入职周年提醒", "恒睿")
+ANNIVERSARY_DRIVE_ROOT_ID = os.environ.get(
+    "ANNIVERSARY_DRIVE_ROOT_ID", "13JH168_QwFcGaboQUrPF2sGnCjbXaa7E"
+)
+ANNIVERSARY_DRIVE_PATH = ("海报助手", "输出", "当月入职周年海报")
+ANNIVERSARY_GROUP_RULES = [
+    {"name": "恒睿公司-ACFAN特战队-全员群", "keywords": ["ACFAN特战队", "ACFAN"], "chat_id": -1003553653887},
+    {"name": "恒睿公司-运营一部-全员群", "keywords": ["运营一部", "运营1部"], "chat_id": -1003663263859},
+    {"name": "恒睿公司-运营二部-全员群", "keywords": ["运营二部", "运营2部"], "chat_id": -1003950803307},
+    {"name": "恒睿-渠道/商务部-全员群", "keywords": ["渠道部", "商务部", "渠道商务部"], "chat_id": -1003872014182},
+    {"name": "恒睿-技术/效能部-全员群", "keywords": ["技术部", "效能部", "技术效能部"], "chat_id": -1003946619557},
+]
+
 # ========== 本地状态文件 ==========
 DB_PATH = "offer_state.json"
 DAILY_REPORT_STATE_PATH = DB_PATH + ".daily_reports.json"
 REGULARIZATION_STATE_PATH = DB_PATH + ".regularization.json"
+ANNIVERSARY_STATE_PATH = DB_PATH + ".anniversary.json"
 
 # ========== 日志文件 ==========
 LOG_PATH = "bot.log"
