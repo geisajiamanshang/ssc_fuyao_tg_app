@@ -7,12 +7,22 @@ import os
 from dotenv import load_dotenv
 
 
+# 先记住启动命令显式传入的 BOT_ENV；基础 .env 只用于兼容旧生产配置。
+_explicit_environment = os.environ.get("BOT_ENV", "").strip()
 load_dotenv()
 
-_environment = os.environ.get("BOT_ENV", "prod").strip().casefold()
+_environment = (
+    _explicit_environment or os.environ.get("BOT_ENV", "prod")
+).strip().casefold()
 if _environment not in {"test", "prod"}:
     raise RuntimeError("BOT_ENV 只能是 test 或 prod")
-load_dotenv(os.path.join(os.path.dirname(__file__), f".env.{_environment}"))
+
+# 环境专用文件必须覆盖基础 .env，否则 test 可能错误复用生产 Session。
+load_dotenv(
+    os.path.join(os.path.dirname(__file__), f".env.{_environment}"),
+    override=True,
+)
+os.environ["BOT_ENV"] = _environment
 
 _profile = importlib.import_module(f"config_{_environment}")
 for _name in dir(_profile):
