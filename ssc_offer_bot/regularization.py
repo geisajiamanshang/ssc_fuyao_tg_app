@@ -14,6 +14,14 @@ _SECTION_RE = re.compile(
 _BLOCK_RE = re.compile(r"(?m)^\s*(?:—{2,}|-{3,})\s*$")
 _NAME_RE = re.compile(r"花名\s*[:：]\s*([^\s,，;；]+)")
 _REMINDER_FOOTER_RE = re.compile(r"(?s)\n*如需延期，.*\Z")
+_TRIGGER_SEPARATOR_RE = re.compile(r"[\s\-‐‑‒–—―－]+")
+
+
+def trigger_keyword_matches(text, keyword):
+    """容忍全角/半角横线、长横线及分隔空格。"""
+    compact_text = _TRIGGER_SEPARATOR_RE.sub("", text or "").casefold()
+    compact_keyword = _TRIGGER_SEPARATOR_RE.sub("", keyword or "").casefold()
+    return bool(compact_keyword and compact_keyword in compact_text)
 
 
 def _escape_query(value):

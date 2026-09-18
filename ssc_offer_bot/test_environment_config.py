@@ -50,6 +50,15 @@ class EnvironmentConfigTests(TestCase):
         self.assertFalse(test.DAILY_REPORT_ENABLED)
         self.assertFalse(test.HRGS_FORWARD_ENABLED)
 
+    def test_only_test_environment_allows_manual_trigger_messages(self):
+        os.environ["BOT_ENV"] = "test"
+        selected = importlib.import_module("config")
+        selected = importlib.reload(selected)
+        self.assertTrue(selected.ALLOW_MANUAL_TRIGGERS)
+        os.environ["BOT_ENV"] = "prod"
+        selected = importlib.reload(selected)
+        self.assertFalse(selected.ALLOW_MANUAL_TRIGGERS)
+
     def test_same_expected_ssc_account_is_enforced(self):
         self.assertEqual(int(os.environ["EXPECTED_SSC_USER_ID"]), 9001)
 

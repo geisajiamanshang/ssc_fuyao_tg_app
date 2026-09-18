@@ -42,7 +42,11 @@ from templates import (
     build_onboarding_confirm_message,
 )
 from daily_reports import DailyReportSender
-from regularization import RegularizationDriveRepository, build_regularization_messages
+from regularization import (
+    RegularizationDriveRepository,
+    build_regularization_messages,
+    trigger_keyword_matches,
+)
 from anniversary import AnniversaryDriveRepository, anniversary_destination
 
 logging.basicConfig(
@@ -246,10 +250,25 @@ async def _send_saved_text(reviewer_id, text):
 @client.on(events.NewMessage(chats=config.GROUP_REGULARIZATION_TRIGGER))
 async def on_regularization_trigger(event):
     text = event.raw_text or ""
-    if event.sender_id != config.REGULARIZATION_TRIGGER_BOT_ID:
+    normalized = unicodedata.normalize("NFKC", text)
+    if (not config.ALLOW_MANUAL_TRIGGERS
+            and event.sender_id != config.REGULARIZATION_TRIGGER_BOT_ID):
+        log.info(
+            "[转正提醒] 忽略非指定机器人消息：chat_id=%s sender_id=%s",
+            event.chat_id, event.sender_id,
+        )
         return
-    if config.REGULARIZATION_TRIGGER_KEYWORD not in unicodedata.normalize("NFKC", text):
+    if not trigger_keyword_matches(normalized, config.REGULARIZATION_TRIGGER_KEYWORD):
+        log.info(
+            "[转正提醒] 消息未命中关键词：chat_id=%s msg_id=%s",
+            event.chat_id, event.message.id,
+        )
         return
+
+    log.info(
+        "[转正提醒] 已捕捉触发消息：environment=%s chat_id=%s msg_id=%s sender_id=%s",
+        config.ENVIRONMENT, event.chat_id, event.message.id, event.sender_id,
+    )
 
     event_key = f"{event.chat_id}:{event.message.id}"
     async with regularization_lock:
@@ -334,7 +353,12 @@ async def on_regularization_trigger(event):
 async def on_anniversary_trigger(event):
     text = event.raw_text or ""
     normalized = unicodedata.normalize("NFKC", text)
-    if event.sender_id != config.ANNIVERSARY_TRIGGER_BOT_ID:
+    if (not config.ALLOW_MANUAL_TRIGGERS
+            and event.sender_id != config.ANNIVERSARY_TRIGGER_BOT_ID):
+        log.info(
+            "[周年提醒] 忽略非指定机器人消息：chat_id=%s sender_id=%s",
+            event.chat_id, event.sender_id,
+        )
         return
     if not all(keyword in normalized for keyword in config.ANNIVERSARY_TRIGGER_KEYWORDS):
         return
