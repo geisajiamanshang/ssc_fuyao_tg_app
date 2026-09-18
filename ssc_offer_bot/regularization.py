@@ -167,8 +167,17 @@ class RegularizationDriveRepository:
             url, params={**auth_params, "alt": "media"}, timeout=120
         )
         response.raise_for_status()
-        response.encoding = response.encoding or "utf-8"
-        return response.text
+        # text/plain may default to Latin-1 in requests even for UTF-8 files.
+        # Decode bytes explicitly and fail clearly instead of matching mojibake.
+        raw = response.content
+        encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                "转正信息文件编码无法识别，请将 TXT 保存为 UTF-8 后重试"
+            ) from exc
+        return text.replace("\r\n", "\n").replace("\r", "\n")
 
     def load_month(self, day):
         session, auth_params = _drive_session()
