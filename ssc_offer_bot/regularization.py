@@ -15,13 +15,49 @@ _BLOCK_RE = re.compile(r"(?m)^\s*(?:—{2,}|-{3,})\s*$")
 _NAME_RE = re.compile(r"花名\s*[:：]\s*([^\s,，;；]+)")
 _REMINDER_FOOTER_RE = re.compile(r"(?s)\n*如需延期，.*\Z")
 _TRIGGER_SEPARATOR_RE = re.compile(r"[\s\-‐‑‒–—―－]+")
+_ORG_SECTION_RE_TEMPLATE = r"【\s*{organization}\s*】(?P<body>.*?)(?=\n\s*【|\Z)"
+_COUNTDOWN_BLOCK_RE_TEMPLATE = (
+    r"转正倒数\s*{days}\s*天\s*[:：](?P<body>.*?)"
+    r"(?=\n\s*(?:转正倒数\s*\d+\s*天|今日转正)\s*[:：]|\Z)"
+)
 
 
 def trigger_keyword_matches(text, keyword):
-    """容忍全角/半角横线、长横线及分隔空格。"""
+    """兼容旧版连续关键词，以及新版“标题 + 公司分区 + 倒数天数”消息。"""
     compact_text = _TRIGGER_SEPARATOR_RE.sub("", text or "").casefold()
     compact_keyword = _TRIGGER_SEPARATOR_RE.sub("", keyword or "").casefold()
-    return bool(compact_keyword and compact_keyword in compact_text)
+    if compact_keyword and compact_keyword in compact_text:
+        return True
+    return bool(extract_trigger_scope(text, organization="恒睿", countdown_days=4))
+
+
+def extract_trigger_scope(text, organization="恒睿", countdown_days=4):
+    """返回指定公司分区内对应倒数天数的人员块；未命中返回空串。"""
+    normalized = text or ""
+    if "转正提醒" not in normalized:
+        return ""
+    org_pattern = _ORG_SECTION_RE_TEMPLATE.format(
+        organization=re.escape(organization)
+    )
+    org_match = re.search(org_pattern, normalized, flags=re.S)
+    if not org_match:
+        return ""
+    countdown_pattern = _COUNTDOWN_BLOCK_RE_TEMPLATE.format(days=countdown_days)
+    countdown_match = re.search(countdown_pattern, org_match.group("body"), flags=re.S)
+    if not countdown_match:
+        return ""
+    body = countdown_match.group("body").strip()
+    return body if body else ""
+
+
+def regularization_trigger_scope(text, keyword):
+    """供处理器提取花名：新版只返回恒睿倒数4天块，旧版保留原消息。"""
+    scoped = extract_trigger_scope(text, organization="恒睿", countdown_days=4)
+    if scoped:
+        return scoped
+    compact_text = _TRIGGER_SEPARATOR_RE.sub("", text or "").casefold()
+    compact_keyword = _TRIGGER_SEPARATOR_RE.sub("", keyword or "").casefold()
+    return text if compact_keyword and compact_keyword in compact_text else ""
 
 
 def _escape_query(value):

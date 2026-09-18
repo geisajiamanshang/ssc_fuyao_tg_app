@@ -45,6 +45,7 @@ from daily_reports import DailyReportSender
 from regularization import (
     RegularizationDriveRepository,
     build_regularization_messages,
+    regularization_trigger_scope,
     trigger_keyword_matches,
 )
 from anniversary import AnniversaryDriveRepository, anniversary_destination
@@ -269,6 +270,9 @@ async def on_regularization_trigger(event):
         "[转正提醒] 已捕捉触发消息：environment=%s chat_id=%s msg_id=%s sender_id=%s",
         config.ENVIRONMENT, event.chat_id, event.message.id, event.sender_id,
     )
+    trigger_scope = regularization_trigger_scope(
+        normalized, config.REGULARIZATION_TRIGGER_KEYWORD
+    )
 
     event_key = f"{event.chat_id}:{event.message.id}"
     async with regularization_lock:
@@ -285,7 +289,7 @@ async def on_regularization_trigger(event):
             monthly_text, source_file = await asyncio.to_thread(
                 regularization_drive.load_month, today
             )
-            names, messages = build_regularization_messages(monthly_text, text)
+            names, messages = build_regularization_messages(monthly_text, trigger_scope)
             if not names:
                 await client.send_message(
                     reviewer.id,
