@@ -20,11 +20,10 @@ SSC Offer 审批流转自动化 主程序。
           -> 回复到联合管理工作群里对应的【offer信息确认】消息，@对应部门领导
 
 运行前请务必先：
-  1. pip install telethon
-  2. 在 config.py 里填好 api_id / api_hash
-  3. 运行 list_chats.py，把群组的数字ID填进 config.py（比用群名字符串更稳）
-  4. 找一个测试群，把 GROUP_HRBP / GROUP_LEADERSHIP / GROUP_RECRUIT 先指向测试群，
-     用几条模拟消息走一遍全流程，确认字段解析和消息格式都对了，再切回正式群。
+  1. pip install -r requirements.txt
+  2. 在 .env 中填写 TG_API_ID / TG_API_HASH
+  3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
+  4. 测试审批使用“测试1/测试2/测试3”，生产审批使用“1/2/3”。
 """
 
 import asyncio
@@ -78,6 +77,8 @@ anniversary_drive = AnniversaryDriveRepository(
 
 async def forward_onboarding_to_hrgs(message, chat_id):
     """仅转发SSC已经发布到联合管理群的入职确认，保留原消息和附件。"""
+    if not config.HRGS_FORWARD_ENABLED:
+        return
     if chat_id != config.GROUP_LEADERSHIP:
         return
     compact = "".join((message.raw_text or "").split())
@@ -117,8 +118,13 @@ async def get_ssc_reviewer():
 
 async def queue_group_message(destination, text, *, candidate, expected_stage,
                               updates, id_field=None, kind="message", reply_to=None,
-                              file=None, approval_code="1"):
+                              file=None, approval_code=None):
     """所有群消息统一先送收藏夹，由该类消息的审批码放行。"""
+    approval_code = approval_code or config.OFFER_APPROVAL_CODE
+    if destination not in config.ALLOWED_DESTINATION_IDS:
+        raise RuntimeError(
+            f"[{config.ENVIRONMENT}] 目标群 {destination} 不在当前环境白名单，已阻止发送"
+        )
     async with ssc_send_lock:
         reviewer = await get_ssc_reviewer()
         draft = await client.send_message(reviewer.id, text, file=file, parse_mode=None)
@@ -139,7 +145,7 @@ async def queue_group_message(destination, text, *, candidate, expected_stage,
 @client.on(events.NewMessage())
 async def on_ssc_send_approval(event):
     approval_code = (event.raw_text or "").strip()
-    if approval_code not in {"1", "2", "3"}:
+    if approval_code not in config.APPROVAL_CODES:
         return
     me = await client.get_me()
     reviewer = await get_ssc_reviewer()
@@ -174,7 +180,7 @@ async def on_ssc_send_approval(event):
             min_id=item["draft_id"] - 1, limit=50
         ):
             if (previous.sender_id in (me.id, reviewer.id)
-                    and (previous.raw_text or "").strip() not in {"1", "2", "3"}):
+                    and (previous.raw_text or "").strip() not in config.APPROVAL_CODES):
                 draft = previous
                 break
         if not draft or (not draft.raw_text and not draft.media):
@@ -302,15 +308,15 @@ async def on_regularization_trigger(event):
                 expected_stage="waiting_ssc_regularization",
                 updates={"stage": "regularization_sent", "names": names},
                 kind="message",
-                approval_code="2",
+                approval_code=config.REGULARIZATION_APPROVAL_CODE,
             )
             regularization_events.set(event_key, {
                 "status": "queued", "names": names, "draft_id": draft.id,
                 "source_file_id": source_file.get("id"),
             })
             log.info(
-                "[转正提醒] %s 的资料已发送收藏夹；草稿msg_id=%s，等待SSC发送2",
-                "、".join(names), draft.id,
+                "[转正提醒] %s 的资料已发送收藏夹；草稿msg_id=%s，等待SSC发送%s",
+                "、".join(names), draft.id, config.REGULARIZATION_APPROVAL_CODE,
             )
         except Exception as exc:
             regularization_events.set(event_key, {
@@ -368,7 +374,7 @@ async def on_anniversary_trigger(event):
                     expected_stage="waiting_ssc_anniversary",
                     updates={"stage": "anniversary_sent", "name": person["name"]},
                     kind="message",
-                    approval_code="3",
+                    approval_code=config.ANNIVERSARY_APPROVAL_CODE,
                 )
                 drafts.append({"name": person["name"], "draft_id": draft.id})
 
@@ -377,8 +383,9 @@ async def on_anniversary_trigger(event):
                 "info_file_id": info_file.get("id"),
             })
             log.info(
-                "[周年提醒] %s 的海报和祝贺已发送收藏夹，等待SSC发送3",
+                "[周年提醒] %s 的海报和祝贺已发送收藏夹，等待SSC发送%s",
                 "、".join(item["name"] for item in people),
+                config.ANNIVERSARY_APPROVAL_CODE,
             )
         except Exception as exc:
             anniversary_events.set(event_key, {
@@ -690,23 +697,31 @@ async def on_private_message(event):
 async def main():
     await client.start()
     me = await client.get_me()
+    if config.EXPECTED_SSC_USER_ID and me.id != config.EXPECTED_SSC_USER_ID:
+        await client.disconnect()
+        raise RuntimeError(
+            f"登录账号ID {me.id} 与配置SSC账号ID {config.EXPECTED_SSC_USER_ID} 不一致"
+        )
     await get_ssc_reviewer()
-    daily_report_sender = DailyReportSender(
-        client,
-        daily_report_state,
-        folder_id=config.DAILY_REPORT_FOLDER_ID,
-        recipient_username=config.DAILY_REPORT_RECIPIENT,
-        timezone=config.DAILY_REPORT_TIMEZONE,
-        poll_seconds=config.DAILY_REPORT_POLL_SECONDS,
-    )
-    daily_report_task = asyncio.create_task(daily_report_sender.run())
-    log.info(f"已登录账号：{me.username or me.id}")
+    daily_report_task = None
+    if config.DAILY_REPORT_ENABLED:
+        daily_report_sender = DailyReportSender(
+            client,
+            daily_report_state,
+            folder_id=config.DAILY_REPORT_FOLDER_ID,
+            recipient_username=config.DAILY_REPORT_RECIPIENT,
+            timezone=config.DAILY_REPORT_TIMEZONE,
+            poll_seconds=config.DAILY_REPORT_POLL_SECONDS,
+        )
+        daily_report_task = asyncio.create_task(daily_report_sender.run())
+    log.info("当前环境：%s；已登录账号：%s", config.ENVIRONMENT, me.username or me.id)
     log.info("SSC Offer 自动化流程已启动，开始监听...")
     try:
         await client.run_until_disconnected()
     finally:
-        daily_report_task.cancel()
-        await asyncio.gather(daily_report_task, return_exceptions=True)
+        if daily_report_task:
+            daily_report_task.cancel()
+            await asyncio.gather(daily_report_task, return_exceptions=True)
 
 
 if __name__ == "__main__":
