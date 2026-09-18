@@ -9,7 +9,8 @@ from daily_reports import DRIVE_FILES_URL, _drive_session
 SECTION_NAMES = ("转正申请", "转正信息同步", "转正通知", "预转正提醒")
 SEPARATOR = "————"
 _SECTION_RE = re.compile(
-    r"【(" + "|".join(map(re.escape, SECTION_NAMES)) + r")】"
+    r"(?m)^[ \t]*【(?P<title>[^【】\r\n]*?(?P<kind>"
+    + "|".join(map(re.escape, SECTION_NAMES)) + r"))】[ \t]*$"
 )
 _BLOCK_RE = re.compile(r"(?m)^\s*(?:—{2,}|-{3,})\s*$")
 _NAME_RE = re.compile(r"花名\s*[:：]\s*([^\s,，;；]+)")
@@ -69,7 +70,15 @@ def split_sections(text):
     sections = {}
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        sections[match.group(1)] = text[match.end():end].strip()
+        kind = match.group("kind")
+        body = text[match.end():end].strip()
+        # 部门/公司前缀标题属于单个人员消息，保留原文并累积同类人员。
+        if match.group("title") != kind:
+            body = match.group(0).strip() + "\n" + body
+        if kind in sections:
+            sections[kind] += "\n\n" + SEPARATOR + "\n\n" + body
+        else:
+            sections[kind] = body
     return sections
 
 
