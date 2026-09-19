@@ -29,6 +29,8 @@ SSC Offer 审批流转自动化 主程序。
 import asyncio
 import logging
 import unicodedata
+from zoneinfo import ZoneInfo
+from batch_approval import is_batch_approval, missing_approvals, recover_approvals
 
 from telethon import TelegramClient, events
 
@@ -555,6 +557,10 @@ async def process_leadership_reply(event):
     if not is_approval(msg.raw_text or ""):
         log.info("[场景2] 非明确同意回复：msg_id=%s", msg.id)
         return
+    if is_batch_approval(msg.raw_text):
+        if username == config.LEADER_FINAL.strip().lstrip('@').casefold():
+            await process_batch_final(event)
+        return
     name, rec = await approval_target(event)
     if not rec:
         log.warning("[场景2] 未匹配Offer或审批提示：msg_id=%s reply_to=%s", msg.id, msg.reply_to_msg_id)
@@ -562,13 +568,23 @@ async def process_leadership_reply(event):
     if msg.id <= rec.get("last_approval_msg_id", 0):
         return
     stage = rec.get("stage")
+    expected_leader = {
+        'sent_to_leadership': config.LEADER_FIRST,
+        'waiting_second_review': config.LEADER_SECOND_TECH,
+        'waiting_final_review': config.LEADER_FINAL,
+        'final_approved_no_resume_found': config.LEADER_FINAL,
+    }.get(stage)
+    if not expected_leader or username != expected_leader.strip().lstrip('@').casefold():
+        return
     if stage == "sent_to_leadership":
+        state.update(name, first_approved_msg_id=msg.id)
         tech = any(kw in rec["org_unit"] for kw in config.TECH_CENTER_KEYWORDS)
         leader = config.LEADER_SECOND_TECH if tech else config.LEADER_FINAL
         next_stage = "waiting_second_review" if tech else "waiting_final_review"
         id_field = "second_review_msg_id" if tech else "final_review_msg_id"
         label = "二级审批" if tech else "三级审批（终审）"
     elif stage == "waiting_second_review":
+        state.update(name, second_approved_msg_id=msg.id)
         leader, next_stage, id_field, label = config.LEADER_FINAL, "waiting_final_review", "final_review_msg_id", "三级审批（终审）"
     elif stage in {"waiting_final_review", "final_approved_no_resume_found"}:
         await handle_final_approved(name, rec)
@@ -588,6 +604,54 @@ async def process_leadership_reply(event):
     )
     state.update(name, last_approval_msg_id=msg.id)
     log.info("[场景2] %s 回复同意，候选人 %s 的%s提示等待SSC审批", username, name, label)
+
+
+async def process_batch_final(event):
+    """终审当天Offer；所有业务通知仍先进入收藏夹。"""
+    zone = ZoneInfo(config.DAILY_REPORT_TIMEZONE)
+    day = event.message.date.astimezone(zone).date()
+    me = await client.get_me()
+    messages, authors = [], {}
+    async for message in client.iter_messages(config.GROUP_LEADERSHIP, max_id=event.message.id):
+        if message.date.astimezone(zone).date() < day:
+            break
+        messages.append(message)
+        if message.sender_id not in authors:
+            sender = await message.get_sender()
+            authors[message.sender_id] = (getattr(sender, 'username', '') or '').casefold()
+    warnings = []
+    for message in sorted(messages, key=lambda m: m.id):
+        if message.sender_id != me.id or 'offer信息确认' not in (message.raw_text or '').casefold():
+            continue
+        name, rec = state.find_by_field('offer_confirm_msg_id', message.id)
+        if not rec:
+            name = get_field(parse_kv_fields(message.raw_text or ''), '候选人姓名') or str(message.id)
+            warnings.append(f'{name}：缺少流程记录，无法核实初审/二级审批，请核查')
+            continue
+        if rec.get('stage') in {'waiting_ssc_recruit_reply', 'waiting_recruiter_dm', 'waiting_ssc_onboarding', 'done'}:
+            continue
+        if rec.get('batch_final_msg_id', 0) >= event.message.id:
+            continue
+        verified = recover_approvals(rec, messages, authors,
+            config.LEADER_FIRST.strip().lstrip('@').casefold(),
+            config.LEADER_SECOND_TECH.strip().lstrip('@').casefold(), is_approval)
+        missing = missing_approvals(verified, config.TECH_CENTER_KEYWORDS)
+        if missing:
+            labels = {'first': f'初审 @{config.LEADER_FIRST}', 'second': f'二级审批 @{config.LEADER_SECOND_TECH}'}
+            warnings.append(f'{name}：缺少' + '、'.join(labels[k] for k in missing) + '的同意记录')
+            continue
+        state.update(name, **{k: verified[k] for k in ('first_approved_msg_id', 'second_approved_msg_id') if k in verified},
+                     batch_final_msg_id=event.message.id)
+        try:
+            await handle_final_approved(name, verified)
+            state.update(name, last_approval_msg_id=event.message.id)
+            if state.get(name).get('stage') == 'final_approved_no_resume_found':
+                warnings.append(f'{name}：审批已通过，但未找到招聘简历，未生成发送草稿')
+        except Exception:
+            log.exception('[批量终审] 候选人处理失败：%s', name)
+            warnings.append(f'{name}：处理失败，请核查日志和收藏夹，避免重复发送')
+    if warnings:
+        await _send_saved_text(me.id, '批量终审检查提醒（' + str(day) + '）\n' + '\n'.join(warnings))
 
 
 def matches_recruit_candidate(text: str, candidate_name: str, candidate_code: str = "") -> bool:
