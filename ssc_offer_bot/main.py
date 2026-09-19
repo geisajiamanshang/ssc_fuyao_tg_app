@@ -34,6 +34,7 @@ from telethon import TelegramClient, events
 
 import config
 from state_store import StateStore
+from approval_queue import select_pending
 from parsers import parse_kv_fields, get_field, strip_header_footer
 from parsers import is_offer_message, offer_header_org, is_approval
 from templates import (
@@ -157,37 +158,19 @@ async def on_ssc_send_approval(event):
     if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
         return
     async with ssc_send_lock:
-        # 仅处理同审批码的最近草稿，重复审批码不会转而发送更早的草稿。
         all_outbox_items = list(outbox.all().values())
-        eligible = [r for r in all_outbox_items
-                    if r["draft_id"] < event.message.id
-                    and r.get("review_chat_id") == reviewer.id
-                    and str(r.get("approval_code", "1")) == approval_code]
-        if not eligible:
-            return
-        item = max(eligible, key=lambda r: r["draft_id"])
-        if item["status"] != "pending":
+        item = select_pending(
+            all_outbox_items, state.all(), reviewer.id, approval_code,
+            event.message.id, event.message.reply_to_msg_id,
+        )
+        if item is None:
             return
         rec = state.get(item["candidate"])
         if not rec or rec.get("stage") != item["expected_stage"]:
             log.warning("[SSC审批] 草稿状态已失效，msg_id=%s", item["draft_id"])
             return
-        # SSC可编辑收藏夹草稿，或发送修改版正文后再发送对应审批码；未修改则用原草稿。
-        draft = None
-        later_draft_ids = [
-            record["draft_id"] for record in all_outbox_items
-            if item["draft_id"] < record["draft_id"] < event.message.id
-        ]
-        # 若之后又产生另一类草稿，只在本草稿自己的区间内查找修改版，避免1/2串单。
-        search_max_id = min(later_draft_ids) if later_draft_ids else event.message.id
-        async for previous in client.iter_messages(
-            reviewer.id, max_id=search_max_id,
-            min_id=item["draft_id"] - 1, limit=50
-        ):
-            if (previous.sender_id in (me.id, reviewer.id)
-                    and (previous.raw_text or "").strip() not in config.APPROVAL_CODES):
-                draft = previous
-                break
+        # 获取指定草稿的最新编辑内容，不把其他草稿或参考资料当作修改版。
+        draft = await client.get_messages(reviewer.id, ids=item["draft_id"])
         if not draft or (not draft.raw_text and not draft.media):
             log.warning("[SSC审批] 草稿不存在或为空，msg_id=%s", item["draft_id"])
             return
