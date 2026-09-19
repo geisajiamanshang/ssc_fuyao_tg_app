@@ -29,14 +29,16 @@ SSC Offer 审批流转自动化 主程序。
 import asyncio
 import logging
 import unicodedata
+import re
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from batch_approval import is_batch_approval, missing_approvals, recover_approvals
 
 from telethon import TelegramClient, events
 
 import config
 from state_store import StateStore
 from approval_queue import select_pending
+from batch_approval import missing_approvals, recover_approvals
 from parsers import parse_kv_fields, get_field, strip_header_footer
 from parsers import is_offer_message, offer_header_org, is_approval, mentions_ssc
 from templates import (
@@ -211,6 +213,9 @@ async def on_ssc_send_approval(event):
                                              file=media, reply_to=item["reply_to"], parse_mode=None)
             if item["id_field"]:
                 updates[item["id_field"]] = sent.id
+            if item["kind"] == "offer":
+                updates.update(offer_sent_at=sent.date.isoformat(),
+                               offer_chat_id=item["destination"], approvals={})
             state.update(item["candidate"], **updates)
             outbox.update(key, status="sent", sent_msg_id=sent.id)
             log.info("[SSC审批] 已发送至群=%s msg_id=%s", item["destination"], sent.id)
@@ -434,8 +439,12 @@ def get_leader_tags(org_unit: str, dept_text: str) -> list:
     for rule in config.DEPARTMENT_LEADER_TAGS:
         rule_org = normalized(rule["org_unit"])
         if org and rule_org and rule_org in org:
-            if any(normalized(kw) in dept for kw in rule["dept_keywords"]):
-                return rule["leaders"]
+            if any(normalized(kw) in dept or (kw and normalized(kw) in org)
+                   for kw in rule["dept_keywords"]):
+                leaders = list(rule["leaders"])
+                if rule_org == normalized("效能中心") and "Nicky_lam" not in leaders:
+                    leaders.insert(max(0, len(leaders) - 1), "Nicky_lam")
+                return leaders
     log.warning("[场景3] 步骤备注未匹配通知名单：org_unit=%r dept_text=%r，停止发送", org_unit, dept_text)
     return []
 
@@ -444,19 +453,23 @@ def get_leader_tags(org_unit: str, dept_text: str) -> list:
 @client.on(events.NewMessage(chats=config.GROUP_HRBP))
 async def on_hrbp_offer(event):
     msg = event.message
+    if not mentions_ssc(msg):
+        return
+
     text = msg.raw_text or ""
     if not is_offer_message(text):
         return
-    if not mentions_ssc(msg):
-        log.info("[场景1] 跳过：消息未提及SSC @ffuuyao / 8853414240，msg_id=%s", msg.id)
-        return  # 只处理@了我的消息
+
+    _, existing = state.find_by_field("offer_source_key", f"{event.chat_id}:{msg.id}")
+    if existing:
+        return
 
     fields = parse_kv_fields(text)
     candidate_name = get_field(fields, "候选人姓名")
     org_unit = get_field(fields, "入职编制组织", "编制组织") or offer_header_org(text)
 
     if not candidate_name:
-        log.warning("[场景1] 缺少候选人姓名，msg_id=%s", msg.id)
+        log.warning(f"[场景1] 未能从消息中解析出候选人姓名，已跳过。原文前100字：{text[:100]!r}")
         return
     if not org_unit:
         log.warning(f"[场景1] 候选人 {candidate_name} 未解析出入职编制组织，已跳过")
@@ -466,11 +479,11 @@ async def on_hrbp_offer(event):
     new_text = build_offer_confirm_message(org_unit, body)
 
     sender = await event.get_sender()
-    hrbp_username = (getattr(sender, "username", None)
-                     or str(event.sender_id))
+    hrbp_username = sender.username or str(sender.id)
 
     state.set(candidate_name, {
         "candidate_name": candidate_name,
+        "offer_source_key": f"{event.chat_id}:{msg.id}",
         "org_unit": org_unit,
         "hrbp_username": hrbp_username,
         "offer_confirm_text": new_text,
@@ -491,23 +504,13 @@ approval_lock = asyncio.Lock()
 
 
 async def approval_target(event):
-    """沿引用链找到SSC原始Offer；普通群回复匹配最近的SSC Offer。"""
+    """沿直接或间接引用找到SSC原始Offer，不猜测无引用的单条审批。"""
     me = await client.get_me()
     target = None
     if event.message.reply_to_msg_id:
         target = await event.message.get_reply_message()
     else:
-        async for previous in client.iter_messages(
-            config.GROUP_LEADERSHIP, max_id=event.message.id, limit=50
-        ):
-            compact = "".join((previous.raw_text or "").casefold().split())
-            known_prompt = any(
-                state.find_by_field(field, previous.id)[1]
-                for field in ("offer_confirm_msg_id", "second_review_msg_id", "final_review_msg_id")
-            )
-            if previous.sender_id == me.id and (known_prompt or "offer信息确认" in compact):
-                target = previous
-                break
+        return None, None
     visited = set()
     for _ in range(20):
         if not target or target.id in visited:
@@ -542,69 +545,180 @@ async def on_leadership_reply(event):
         await process_leadership_reply(event)
 
 
+def approval_roles(org):
+    # 只有技术中心需要二级审批；效能中心等其他组织不进入该分支。
+    return ["first", "second", "final"] if "技术中心" in "".join(
+        unicodedata.normalize("NFKC", org or "").split()
+    ) else ["first", "final"]
+
+
+def role_username(role):
+    return {
+        "first": config.LEADER_FIRST,
+        "second": config.LEADER_SECOND_TECH,
+        "final": config.LEADER_FINAL,
+    }[role].strip().lstrip("@").casefold()
+
+
+def approval_role(sender):
+    username = (getattr(sender, "username", None) or "").casefold()
+    matches = [r for r in ("first", "second", "final")
+               if username and username == role_username(r)]
+    # 配置重叠时不能把同一次发言当作多级审批。
+    return matches[0] if len(matches) == 1 else None
+
+
+def batch_approval(text):
+    value = unicodedata.normalize("NFKC", text or "")
+    return is_approval(value) and "以上" in value
+
+
+def apply_approval_evidence(rec, role, msg_id, sender_id):
+    roles = approval_roles(rec.get("org_unit"))
+    if role not in roles:
+        return [], False
+    evidence = rec.setdefault("approvals", {})
+    missing = [r for r in roles[:roles.index(role)]
+               if not evidence.get(r) or evidence[r]["message_id"] >= msg_id]
+    if missing or evidence.get(role):
+        return missing, False
+    evidence[role] = {"message_id": msg_id, "sender_id": sender_id}
+    return [], True
+
+
+async def notify_missing(name, missing):
+    labels = {"first": "一级（初审）", "second": "二级", "final": "三级（终审）"}
+    reviewer = await get_ssc_reviewer()
+    text = name + "-卡在" + "、".join(
+        labels[r] + "领导 @" + role_username(r) + " 的审批" for r in missing
+    )
+    await client.send_message(reviewer.id, text, parse_mode=None)
+
+
+async def todays_offer_records(event):
+    """以原Offer的群内发布时间界定今日；旧状态也从Telegram核实。"""
+    zone = ZoneInfo(config.DAILY_REPORT_TIMEZONE)
+    day = event.message.date.astimezone(zone).date()
+    found = []
+    for name, stored in list(state.all().items()):
+        source_id = stored.get("offer_confirm_msg_id")
+        if not source_id or source_id >= event.message.id:
+            continue
+        if stored.get("offer_chat_id", config.GROUP_LEADERSHIP) != config.GROUP_LEADERSHIP:
+            continue
+        source = await client.get_messages(config.GROUP_LEADERSHIP, ids=source_id)
+        if not source or source.date.astimezone(zone).date() != day:
+            continue
+        me = await client.get_me()
+        if source.sender_id != me.id or "offer信息确认" not in (source.raw_text or "").casefold():
+            continue
+        fields = parse_kv_fields(source.raw_text or "")
+        org = get_field(fields, "入职编制组织", "编制组织") or offer_header_org(source.raw_text or "")
+        rec = dict(stored, org_unit=org or stored.get("org_unit", ""))
+        found.append((name, rec))
+    return found
+
+
+async def recover_approval_evidence(event, records):
+    """按时间回放群内历史，恢复旧状态缺少的审批证据；回放不发送消息。"""
+    if not records:
+        return
+    oldest = min(rec["offer_confirm_msg_id"] for _, rec in records)
+    by_name = {name: rec for name, rec in records}
+    async for message in client.iter_messages(
+        config.GROUP_LEADERSHIP, min_id=oldest,
+        max_id=event.message.id, reverse=True
+    ):
+        if not is_approval(message.raw_text or ""):
+            continue
+        sender = await message.get_sender()
+        role = approval_role(sender)
+        if not role:
+            continue
+        if batch_approval(message.raw_text):
+            zone = ZoneInfo(config.DAILY_REPORT_TIMEZONE)
+            targets = []
+            for name, rec in records:
+                source = await client.get_messages(config.GROUP_LEADERSHIP, ids=rec["offer_confirm_msg_id"])
+                if (source and source.id < message.id and
+                        source.date.astimezone(zone).date() == message.date.astimezone(zone).date()):
+                    targets.append((name, rec))
+        else:
+            # 仅明确引用链可回放为旧审批证据，不猜测无引用的“好的”。
+            if not getattr(message, "reply_to_msg_id", None):
+                continue
+            from types import SimpleNamespace
+            name, _ = await approval_target(SimpleNamespace(message=message))
+            targets = [(name, by_name[name])] if name in by_name else []
+        for name, rec in targets:
+            apply_approval_evidence(rec, role, message.id, message.sender_id)
+    for name, rec in records:
+        state.update(name, approvals=rec.get("approvals", {}))
+
+
+async def advance_offer(name, rec):
+    roles = approval_roles(rec.get("org_unit"))
+    evidence = rec.get("approvals", {})
+    if all(evidence.get(r) for r in roles):
+        if rec.get("stage") not in {
+            "waiting_ssc_recruit_reply", "waiting_recruiter_dm",
+            "waiting_ssc_onboarding", "done",
+        }:
+            # 失效旧审批草稿，避免终审后又发送过时提示。
+            state.update(name, stage="final_approved_no_resume_found")
+            await handle_final_approved(name, dict(rec, stage="final_approved_no_resume_found"))
+        return
+    if not evidence.get("first"):
+        return
+    role = next(r for r in roles if not evidence.get(r))
+    next_stage = "waiting_second_review" if role == "second" else "waiting_final_review"
+    pending_stage = "waiting_ssc_" + next_stage
+    if rec.get("stage") in {next_stage, pending_stage}:
+        return
+    leader = role_username(role)
+    text = (f"@{leader} 初审已通过，请领导二级审批，谢谢" if role == "second"
+            else f"@{leader} 初审已通过，请领导终审，谢谢")
+    await queue_group_message(
+        config.GROUP_LEADERSHIP, text,
+        reply_to=rec["offer_confirm_msg_id"], candidate=name,
+        expected_stage=pending_stage,
+        updates={"org_unit": rec["org_unit"], "stage": next_stage},
+        id_field="second_review_msg_id" if role == "second" else "final_review_msg_id",
+    )
+
+
 async def process_leadership_reply(event):
     msg = event.message
-    sender = await event.get_sender()
-    username = (getattr(sender, "username", None) or "").casefold()
-    leaders = {
-        value.strip().lstrip("@").casefold()
-        for value in (config.LEADER_FIRST, config.LEADER_SECOND_TECH, config.LEADER_FINAL)
-        if value and value.strip().lstrip("@")
-    }
-    if username not in leaders:
-        log.info("[场景2] 未匹配审批领导：username=%s msg_id=%s", username, msg.id)
+    role = approval_role(await event.get_sender())
+    if not role or not is_approval(msg.raw_text or ""):
         return
-    if not is_approval(msg.raw_text or ""):
-        log.info("[场景2] 非明确同意回复：msg_id=%s", msg.id)
+    if batch_approval(msg.raw_text) and role == "final":
+        await process_batch_final(event)
         return
-    if is_batch_approval(msg.raw_text):
-        if username == config.LEADER_FINAL.strip().lstrip('@').casefold():
-            await process_batch_final(event)
-        return
-    name, rec = await approval_target(event)
-    if not rec:
-        log.warning("[场景2] 未匹配Offer或审批提示：msg_id=%s reply_to=%s", msg.id, msg.reply_to_msg_id)
-        return
-    if msg.id <= rec.get("last_approval_msg_id", 0):
-        return
-    stage = rec.get("stage")
-    expected_leader = {
-        'sent_to_leadership': config.LEADER_FIRST,
-        'waiting_second_review': config.LEADER_SECOND_TECH,
-        'waiting_final_review': config.LEADER_FINAL,
-        'final_approved_no_resume_found': config.LEADER_FINAL,
-    }.get(stage)
-    if not expected_leader or username != expected_leader.strip().lstrip('@').casefold():
-        return
-    if stage == "sent_to_leadership":
-        state.update(name, first_approved_msg_id=msg.id)
-        tech = any(kw in rec["org_unit"] for kw in config.TECH_CENTER_KEYWORDS)
-        leader = config.LEADER_SECOND_TECH if tech else config.LEADER_FINAL
-        next_stage = "waiting_second_review" if tech else "waiting_final_review"
-        id_field = "second_review_msg_id" if tech else "final_review_msg_id"
-        label = "二级审批" if tech else "三级审批（终审）"
-    elif stage == "waiting_second_review":
-        state.update(name, second_approved_msg_id=msg.id)
-        leader, next_stage, id_field, label = config.LEADER_FINAL, "waiting_final_review", "final_review_msg_id", "三级审批（终审）"
-    elif stage in {"waiting_final_review", "final_approved_no_resume_found"}:
-        await handle_final_approved(name, rec)
-        state.update(name, last_approval_msg_id=msg.id)
-        return
+    if batch_approval(msg.raw_text):
+        records = await todays_offer_records(event)
     else:
+        name, rec = await approval_target(event)
+        records = [(name, rec)] if rec else []
+    if not records:
+        log.warning("[Offer审批] 未找到可关联的Offer，msg_id=%s", msg.id)
         return
-    await queue_group_message(
-        config.GROUP_LEADERSHIP,
-        # 固定审批提示：所有路径只按目标审批级别选择，不改写正文。
-        (f"@{leader.strip().lstrip('@')} 初审已通过，请领导二级审批，谢谢"
-         if next_stage == "waiting_second_review"
-         else f"@{leader.strip().lstrip('@')} 初审已通过，请领导终审，谢谢"),
-        reply_to=rec["offer_confirm_msg_id"],
-        candidate=name, expected_stage="waiting_ssc_" + next_stage,
-        updates={"org_unit": rec["org_unit"], "stage": next_stage}, id_field=id_field,
-    )
-    state.update(name, last_approval_msg_id=msg.id)
-    log.info("[场景2] %s 回复同意，候选人 %s 的%s提示等待SSC审批", username, name, label)
-
+    await recover_approval_evidence(event, records)
+    for name, rec in records:
+        try:
+            rec["approvals"] = dict(state.get(name).get("approvals", {}))
+            missing, changed = apply_approval_evidence(rec, role, msg.id, event.sender_id)
+            if missing:
+                await notify_missing(name, missing)
+                continue
+            if not changed:
+                continue
+            state.update(name, approvals=rec["approvals"], last_approval_msg_id=msg.id)
+            await advance_offer(name, rec)
+        except Exception:
+            log.exception("[Offer审批] 候选人=%s 处理失败；继续检查其他候选人", name)
+            reviewer = await get_ssc_reviewer()
+            await client.send_message(reviewer.id, name + "-审批处理异常，请检查日志", parse_mode=None)
 
 async def process_batch_final(event):
     """终审当天Offer；所有业务通知仍先进入收藏夹。"""
@@ -668,7 +782,9 @@ def matches_recruit_candidate(text: str, candidate_name: str, candidate_code: st
 
     fields = parse_kv_fields(text)
     resume_code = get_field(fields, "候选人编码")
-    resume_name = get_field(fields, "候选人姓名")
+    if not resume_code:
+        return False
+    resume_name = get_field(fields, "简历名", "候选人姓名")
     if candidate_code and resume_code:
         return normalized(candidate_code) == normalized(resume_code)
     return bool(normalized(candidate_name) and normalized(resume_name)
@@ -693,6 +809,8 @@ async def handle_final_approved(candidate_name: str, rec: dict):
     if not resume_msg:
         log.warning(f"[场景2] 终审通过，但在招聘群未找到候选人「{candidate_name}」的简历消息，需要人工处理")
         state.update(candidate_name, stage="final_approved_no_resume_found")
+        reviewer = await get_ssc_reviewer()
+        await client.send_message(reviewer.id, candidate_name + "-终审已通过，但未找到含候选人编码的匹配简历，请核对招聘群记录", parse_mode=None)
         return
 
     recruiter = await resume_msg.get_sender()
@@ -705,11 +823,13 @@ async def handle_final_approved(candidate_name: str, rec: dict):
         salary_probation=rec.get("salary_probation", ""),
         recruiter_username=recruiter_username,
         hrbp_username=rec.get("hrbp_username", ""),
+        probation_period=get_field(rec.get("raw_fields", {}), "试用期") or "2个月",
     )
     await queue_group_message(
         config.GROUP_RECRUIT, reply_text, reply_to=resume_msg.id,
         candidate=candidate_name, expected_stage="waiting_ssc_recruit_reply",
-        updates={"recruiter_username": recruiter_username, "resume_msg_id": resume_msg.id,
+        updates={"recruiter_username": recruiter_username, "recruiter_id": recruiter.id,
+                 "resume_msg_id": resume_msg.id,
                  "resume_fields": parse_kv_fields(resume_msg.raw_text or ""),
                  "stage": "waiting_recruiter_dm"},
     )
@@ -728,11 +848,7 @@ async def on_private_message(event):
 
     sender = await event.get_sender()
     sender_username = sender.username or ""
-    if not sender_username:
-        log.warning("[场景3] 收到私聊消息，但对方没有设置用户名，无法匹配到候选人记录")
-        return
-
-    candidate_name, rec = state.find_pending_for_recruiter(sender_username, text)
+    candidate_name, rec = state.find_pending_for_recruiter(sender_username, text, sender.id)
     if not rec:
         log.info(f"[场景3] 收到来自 @{sender_username} 的私聊消息，但未匹配到待处理候选人，已忽略")
         return
@@ -760,8 +876,8 @@ async def on_private_message(event):
         log.warning("[场景3] 原Offer消息不可用，已停止生成入职确认：%s", candidate_name)
         return
     original_fields = parse_kv_fields(offer_text)
-    org_unit = get_field(original_fields, "入职编制组织", "编制组织") or rec["org_unit"]
-    leaders = get_leader_tags(org_unit, get_field(original_fields, "入职部门"))
+    org_unit = get_field(merged_fields, "入职编制组织", "编制组织") or rec["org_unit"]
+    leaders = get_leader_tags(org_unit, get_field(merged_fields, "入职部门"))
     if not leaders:
         return
     final_text = build_onboarding_confirm_message(org_unit, merged_fields, leaders, offer_text)
