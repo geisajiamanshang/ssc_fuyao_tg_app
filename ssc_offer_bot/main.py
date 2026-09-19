@@ -637,12 +637,19 @@ async def process_batch_final(event):
             config.LEADER_SECOND_TECH.strip().lstrip('@').casefold(), is_approval)
         missing = missing_approvals(verified, config.TECH_CENTER_KEYWORDS)
         if missing:
-            labels = {'first': f'初审 @{config.LEADER_FIRST}', 'second': f'二级审批 @{config.LEADER_SECOND_TECH}'}
-            warnings.append(f'{name}：缺少' + '、'.join(labels[k] for k in missing) + '的同意记录')
+            labels = {'first': f'一级领导 @{config.LEADER_FIRST} 的初审', 'second': f'二级领导 @{config.LEADER_SECOND_TECH} 的审批'}
+            warnings.append(f'{name}：尚未经过' + '、'.join(labels[k] for k in missing) + '（未找到同意记录），本次不放行')
             continue
         state.update(name, **{k: verified[k] for k in ('first_approved_msg_id', 'second_approved_msg_id') if k in verified},
                      batch_final_msg_id=event.message.id)
         try:
+            # 审批通过的原始Offer独立转到收藏夹，不依赖招聘群能否找到简历。
+            if not rec.get('batch_offer_forward_status'):
+                state.update(name, batch_offer_forward_status='sending')
+                forwarded = await client.forward_messages(
+                    me.id, message.id, from_peer=config.GROUP_LEADERSHIP)
+                state.update(name, batch_offer_forward_status='sent',
+                             batch_offer_saved_msg_id=forwarded.id)
             await handle_final_approved(name, verified)
             state.update(name, last_approval_msg_id=event.message.id)
             if state.get(name).get('stage') == 'final_approved_no_resume_found':
