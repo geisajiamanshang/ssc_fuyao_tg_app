@@ -6,7 +6,7 @@ import os
 
 API_ID = int(os.environ.get("TG_API_ID", "0"))
 API_HASH = os.environ.get("TG_API_HASH", "").strip()
-EXPECTED_SSC_USER_ID = int(os.environ.get("EXPECTED_SSC_USER_ID", "0"))
+EXPECTED_SSC_USER_ID = 8853414240
 
 if not API_ID or not API_HASH:
     raise RuntimeError("当前环境缺少 TG_API_ID / TG_API_HASH")

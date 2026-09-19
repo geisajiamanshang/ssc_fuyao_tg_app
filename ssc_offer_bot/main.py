@@ -445,9 +445,8 @@ async def on_hrbp_offer(event):
     text = msg.raw_text or ""
     if not is_offer_message(text):
         return
-    me = await client.get_me()
-    if not mentions_ssc(msg, me):
-        log.info("[场景1] 跳过：消息未@当前登录SSC账号，msg_id=%s", msg.id)
+    if not mentions_ssc(msg):
+        log.info("[场景1] 跳过：消息未提及SSC @ffuuyao / 8853414240，msg_id=%s", msg.id)
         return  # 只处理@了我的消息
 
     fields = parse_kv_fields(text)

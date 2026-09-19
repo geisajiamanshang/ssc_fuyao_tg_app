@@ -12,17 +12,15 @@ from parsers import (mentions_ssc, is_offer_message, parse_kv_fields,
 
 class MentionTests(TestCase):
     def test_missing_flag_still_accepts_exact_username(self):
-        me = NS(id=9, username='ffuuyao')
         for text in ['@ffuuyao 请审批', '@FFUUYAO', '请@ffuuyao审批']:
-            self.assertTrue(mentions_ssc(NS(raw_text=text), me))
+            self.assertTrue(mentions_ssc(NS(raw_text=text)))
         for text in ['@ffuuyao_other', '@other', '小A 小B 小C']:
-            self.assertFalse(mentions_ssc(NS(raw_text=text), me))
+            self.assertFalse(mentions_ssc(NS(raw_text=text)))
 
     def test_id_mention_and_flag(self):
-        me = NS(id=9, username=None)
-        self.assertTrue(mentions_ssc(NS(mentioned=True), me))
-        self.assertTrue(mentions_ssc(NS(entities=[NS(user_id=9)]), me))
-        self.assertFalse(mentions_ssc(NS(entities=[NS(user_id=8)]), me))
+        self.assertFalse(mentions_ssc(NS(mentioned=True)))
+        self.assertTrue(mentions_ssc(NS(entities=[NS(user_id=8853414240)])))
+        self.assertFalse(mentions_ssc(NS(entities=[NS(user_id=8)])))
 
 
 class MemoryStore:

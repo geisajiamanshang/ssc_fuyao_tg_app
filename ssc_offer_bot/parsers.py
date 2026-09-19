@@ -16,19 +16,14 @@ import re
 import unicodedata
 
 
-def mentions_ssc(message, account):
-    """兼容 mentioned 标记、按ID提及，以及正文中完整的SSC用户名。"""
-    if getattr(message, "mentioned", False):
-        return True
-    if any(getattr(entity, "user_id", None) == account.id
+def mentions_ssc(message):
+    """两套环境均识别指定SSC，不依赖当前账号的 mentioned 标记。"""
+    if any(getattr(entity, "user_id", None) == 8853414240
            for entity in (getattr(message, "entities", None) or [])):
         return True
-    username = getattr(account, "username", None)
-    if not username:
-        return False
     return bool(re.search(
-        r"(?<![A-Za-z0-9_@])@" + re.escape(username) + r"(?![A-Za-z0-9_])",
-        message.raw_text or "", re.I,
+        r"(?<![A-Za-z0-9_@])@ffuuyao(?![A-Za-z0-9_])",
+        getattr(message, "raw_text", "") or "", re.I,
     ))
 
 
