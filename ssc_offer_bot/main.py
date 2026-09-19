@@ -579,7 +579,13 @@ def apply_approval_evidence(rec, role, msg_id, sender_id):
         return [], False
     evidence = rec.setdefault("approvals", {})
     missing = [r for r in roles[:roles.index(role)]
-               if not evidence.get(r) or evidence[r]["message_id"] >= msg_id]
+               if not evidence.get(r) or (role != "final" and evidence[r]["message_id"] >= msg_id)]
+    # 终审可先于缺失的初审/二级审批：保存事实，待其他级别补齐再放行。
+    if role == "final":
+        changed = not evidence.get(role)
+        if changed:
+            evidence[role] = {"message_id": msg_id, "sender_id": sender_id}
+        return missing, changed
     if missing or evidence.get(role):
         return missing, False
     evidence[role] = {"message_id": msg_id, "sender_id": sender_id}
@@ -708,6 +714,8 @@ async def process_leadership_reply(event):
         try:
             rec["approvals"] = dict(state.get(name).get("approvals", {}))
             missing, changed = apply_approval_evidence(rec, role, msg.id, event.sender_id)
+            if changed:
+                state.update(name, approvals=rec["approvals"], last_approval_msg_id=msg.id)
             if missing:
                 await notify_missing(name, missing)
                 continue
@@ -749,6 +757,16 @@ async def process_batch_final(event):
         verified = recover_approvals(rec, messages, authors,
             config.LEADER_FIRST.strip().lstrip('@').casefold(),
             config.LEADER_SECOND_TECH.strip().lstrip('@').casefold(), is_approval)
+        evidence = dict(rec.get("approvals", {}))
+        evidence.setdefault("final", {"message_id": event.message.id,
+                                      "sender_id": getattr(event, "sender_id", None)})
+        for role, field in (("first", "first_approved_msg_id"), ("second", "second_approved_msg_id")):
+            if verified.get(field):
+                evidence.setdefault(role, {"message_id": verified[field]})
+            elif evidence.get(role):
+                verified[field] = evidence[role]["message_id"]
+        verified["approvals"] = evidence
+        state.update(name, approvals=evidence)
         missing = missing_approvals(verified, config.TECH_CENTER_KEYWORDS)
         if missing:
             labels = {'first': f'一级领导 @{config.LEADER_FIRST} 的初审', 'second': f'二级领导 @{config.LEADER_SECOND_TECH} 的审批'}

@@ -50,5 +50,6 @@ class BatchFlowTests(IsolatedAsyncioTestCase):
         self.assertEqual([call.args[0] for call in final.await_args_list], ['小A', '小B'])
         self.assertIn('小C：尚未经过一级领导 @first 的初审', notify.await_args.args[1])
         self.assertNotIn('batch_final_msg_id', records['小C'])
+        self.assertEqual(records['小C']['approvals']['final']['message_id'],100)
         await env['process_batch_final'](event)
         self.assertEqual(forward.await_count, 2)

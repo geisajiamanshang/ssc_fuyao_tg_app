@@ -93,13 +93,13 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
     def test_missing_and_order(self):
         rec={'org_unit':'技术中心'}
         missing,changed=ns['apply_approval_evidence'](rec,'final',30,3)
-        self.assertEqual(missing,['first','second']);self.assertFalse(changed)
+        self.assertEqual(missing,['first','second']);self.assertTrue(changed)
         ns['apply_approval_evidence'](rec,'first',10,1)
         self.assertEqual(ns['apply_approval_evidence'](rec,'final',30,3)[0],['second'])
         ns['apply_approval_evidence'](rec,'second',20,2)
-        self.assertTrue(ns['apply_approval_evidence'](rec,'final',30,3)[1])
         self.assertFalse(ns['apply_approval_evidence'](rec,'final',30,3)[1])
-        self.assertEqual(ns['apply_approval_evidence']({'org_unit':'运营中心','approvals':{'first':{'message_id':50}}},'final',40,3)[0],['first'])
+        self.assertFalse(ns['apply_approval_evidence'](rec,'final',30,3)[1])
+        self.assertEqual(ns['apply_approval_evidence']({'org_unit':'运营中心','approvals':{'first':{'message_id':50}}},'final',40,3)[0],[])
 
     async def test_a_b_continue_c_warn(self):
         data={name:{'org_unit':'运营中心','stage':'waiting_final_review',
@@ -116,7 +116,7 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c.args[0] for c in ns['handle_final_approved'].call_args_list],['A','B'])
         notice=ns['client'].send_message.call_args.args[1]
         self.assertIn('C-卡在一级',notice)
-        self.assertNotIn('final',data['C']['approvals'])
+        self.assertEqual(data['C']['approvals']['final']['message_id'],50)
         self.assertEqual(ns['queue_group_message'].await_count,0)
 
     async def test_first_review_queues_correct_prompt(self):
