@@ -36,7 +36,7 @@ import config
 from state_store import StateStore
 from approval_queue import select_pending
 from parsers import parse_kv_fields, get_field, strip_header_footer
-from parsers import is_offer_message, offer_header_org, is_approval
+from parsers import is_offer_message, offer_header_org, is_approval, mentions_ssc
 from templates import (
     build_offer_confirm_message,
     build_recruit_reply_message,
@@ -442,20 +442,20 @@ def get_leader_tags(org_unit: str, dept_text: str) -> list:
 @client.on(events.NewMessage(chats=config.GROUP_HRBP))
 async def on_hrbp_offer(event):
     msg = event.message
-    if not msg.mentioned:
-        log.info("[场景1] 跳过：消息未@当前登录SSC账号，msg_id=%s", msg.id)
-        return  # 只处理@了我的消息
-
     text = msg.raw_text or ""
     if not is_offer_message(text):
         return
+    me = await client.get_me()
+    if not mentions_ssc(msg, me):
+        log.info("[场景1] 跳过：消息未@当前登录SSC账号，msg_id=%s", msg.id)
+        return  # 只处理@了我的消息
 
     fields = parse_kv_fields(text)
     candidate_name = get_field(fields, "候选人姓名")
     org_unit = get_field(fields, "入职编制组织", "编制组织") or offer_header_org(text)
 
     if not candidate_name:
-        log.warning(f"[场景1] 未能从消息中解析出候选人姓名，已跳过。原文前100字：{text[:100]!r}")
+        log.warning("[场景1] 缺少候选人姓名，msg_id=%s", msg.id)
         return
     if not org_unit:
         log.warning(f"[场景1] 候选人 {candidate_name} 未解析出入职编制组织，已跳过")
@@ -465,7 +465,8 @@ async def on_hrbp_offer(event):
     new_text = build_offer_confirm_message(org_unit, body)
 
     sender = await event.get_sender()
-    hrbp_username = sender.username or str(sender.id)
+    hrbp_username = (getattr(sender, "username", None)
+                     or str(event.sender_id))
 
     state.set(candidate_name, {
         "candidate_name": candidate_name,
