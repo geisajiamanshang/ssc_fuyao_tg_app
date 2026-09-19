@@ -1,0 +1,19 @@
+# 环境密钥与账号登录态
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.env.txt
+*.session
+*.session-journal
+*service-account*.json
+secrets/
+
+# 运行时文件
+offer_state*.json
+bot*.log
+update*.log
+__pycache__/
+*.pyc
+.venv/
+venv/
