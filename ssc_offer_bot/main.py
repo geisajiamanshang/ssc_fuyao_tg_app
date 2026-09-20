@@ -154,6 +154,8 @@ async def queue_group_message(destination, text, *, candidate, expected_stage,
 
 @client.on(events.NewMessage())
 async def on_ssc_send_approval(event):
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
     approval_code = (event.raw_text or "").strip()
     if approval_code not in config.APPROVAL_CODES:
         return
@@ -421,6 +423,8 @@ async def on_anniversary_trigger(event):
 
 @client.on(events.NewMessage())
 async def debug_all_messages(event):
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
     try:
         chat = await event.get_chat()
         chat_title = getattr(chat, "title", None) or getattr(chat, "first_name", "私聊/未知")
@@ -876,6 +880,8 @@ async def handle_final_approved(candidate_name: str, rec: dict):
 
 @client.on(events.NewMessage())
 async def retry_recruit_notifications(event):
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
     if (event.raw_text or '').strip() != '重试招聘通知':
         return
     me = await client.get_me()

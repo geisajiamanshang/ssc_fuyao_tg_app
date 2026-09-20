@@ -39,6 +39,8 @@ ALLOWED_DESTINATION_IDS = frozenset({
     GROUP_RECRUIT,
     *(rule["chat_id"] for rule in ANNIVERSARY_GROUP_RULES),
 })
+# 生产进程即便账号仍留在测试群里，也一律不处理测试群消息。
+EXCLUDED_CHAT_IDS = TEST_CHAT_IDS if ENVIRONMENT == "prod" else frozenset()
 
 if ENVIRONMENT == "test":
     _test_chat_ids = ALLOWED_DESTINATION_IDS | {
