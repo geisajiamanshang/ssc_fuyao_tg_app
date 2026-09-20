@@ -124,10 +124,13 @@ def extract_section_for_names(section_name, section_text, names):
     if not selected:
         return ""
 
-    result = f"【{section_name}】\n\n" + f"\n\n{SEPARATOR}\n\n".join(selected)
+    body = f"\n\n{SEPARATOR}\n\n".join(selected)
     if footer:
-        result += f"\n\n{SEPARATOR}\n\n{footer}"
-    return result.strip()
+        body += f"\n\n{footer}"
+    # 预转正提醒直接发到领导群，不加分区标签；其余参考资料发到收藏夹，保留标签便于辨认。
+    if section_name == "预转正提醒":
+        return body.strip()
+    return (f"【{section_name}】\n\n" + body).strip()
 
 
 def build_regularization_messages(monthly_text, trigger_text):
