@@ -1,39 +1,39 @@
 #!/usr/bin/env bash
-# 自动拉取 GitHub 最新代码并重启服务，配合 crontab 定时执行使用。
-#
-# 用法（在VPS上，仓库目录下手动测试一次）：
-#   bash auto_update.sh
-#
-# 配合 crontab 定时跑，比如每5分钟检查一次有没有新代码：
-#   crontab -e
-#   然后加一行（把路径换成你实际的部署路径）：
-#   */5 * * * * /bin/bash /root/ssc_fuyao_tg_app/auto_update.sh >> /root/ssc_fuyao_tg_app/update.log 2>&1
+# 对应实例只跟随自己的固定分支：bash auto_update.sh test|prod
+set -euo pipefail
 
-set -e
+ENVIRONMENT="${1:-}"
+case "$ENVIRONMENT" in
+  test) BRANCH="test"; SERVICE_NAME="ssc-offer-bot-test" ;;
+  prod) BRANCH="main"; SERVICE_NAME="ssc-offer-bot-prod" ;;
+  *) echo "用法: bash auto_update.sh test|prod" >&2; exit 2 ;;
+esac
 
-APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE_NAME="ssc-offer-bot"
-BRANCH="main"
+APP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BOT_DIR="$APP_ROOT/ssc_offer_bot"
 
-cd "$APP_DIR"
-
-BEFORE=$(git rev-parse HEAD)
-git fetch origin "$BRANCH"
-git reset --hard "origin/$BRANCH"
-AFTER=$(git rev-parse HEAD)
-
-if [ "$BEFORE" == "$AFTER" ]; then
-    echo "$(date '+%F %T') 没有新代码，跳过"
-    exit 0
+if [[ "$(git -C "$APP_ROOT" branch --show-current)" != "$BRANCH" ]]; then
+  echo "拒绝更新：$ENVIRONMENT 实例只能跟随 $BRANCH 分支" >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$APP_ROOT" status --porcelain)" ]]; then
+  echo "拒绝更新：仓库存在未提交修改" >&2
+  exit 1
 fi
 
-echo "$(date '+%F %T') 检测到新代码：$BEFORE -> $AFTER"
+BEFORE="$(git -C "$APP_ROOT" rev-parse HEAD)"
+git -C "$APP_ROOT" fetch origin "$BRANCH"
+git -C "$APP_ROOT" merge --ff-only "origin/$BRANCH"
+AFTER="$(git -C "$APP_ROOT" rev-parse HEAD)"
 
-# requirements.txt 有变化时才重新安装依赖，节省时间
-if git diff --name-only "$BEFORE" "$AFTER" | grep -q "requirements.txt"; then
-    echo "requirements.txt 有变化，重新安装依赖"
-    "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+if [[ "$BEFORE" == "$AFTER" ]]; then
+  echo "$(date '+%F %T') 没有新代码"
+  exit 0
 fi
 
-echo "重启服务 $SERVICE_NAME"
+if git -C "$APP_ROOT" diff --name-only "$BEFORE" "$AFTER" | grep -q 'requirements.txt'; then
+  "$APP_ROOT/.venv/bin/pip" install -r "$BOT_DIR/requirements.txt"
+fi
+(cd "$BOT_DIR" && "$APP_ROOT/.venv/bin/python" -m unittest discover -p 'test_*.py')
 systemctl restart "$SERVICE_NAME"
+systemctl --no-pager --full status "$SERVICE_NAME"

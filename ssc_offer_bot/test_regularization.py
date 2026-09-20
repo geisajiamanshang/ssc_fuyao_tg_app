@@ -85,6 +85,10 @@ class FakeResponse:
         self.text = text
         self.encoding = "utf-8"
 
+    @property
+    def content(self):
+        return self.text.encode(self.encoding)
+
     def raise_for_status(self):
         return None
 

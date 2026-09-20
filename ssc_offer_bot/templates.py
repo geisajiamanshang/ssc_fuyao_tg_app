@@ -25,13 +25,14 @@ def build_recruit_reply_message(
     salary_probation: str,
     recruiter_username: str,
     hrbp_username: str,
+    probation_period: str = "2个月",
 ) -> str:
     """场景二：终审通过后，回复招聘群简历消息，通知招聘 + 抄送hrbp。"""
     return (
         f"简历名：{candidate_name}\n"
         f"职位： {position}\n"
         f"转正薪资：{salary_confirm}\n"
-        f"试用期：2个月\n"
+        f"试用期：{probation_period}\n"
         f"试用薪资：{salary_probation}\n\n"
         f"@{recruiter_username}   Offer审批已通过，请跟进候选人确认招聘信息和入职信息，"
         f"为防止隐私泄漏，请招聘私聊我，谢谢\n"
@@ -49,6 +50,19 @@ def build_onboarding_confirm_message(
     if not offer_text.strip():
         raise ValueError("缺少原Offer消息，不能重建或添加原文没有的字段")
     body = strip_header_footer(offer_text)
+    # 更新原有结构字段，保留未知行和面试评价正文。
+    structural = {"候选人编码", "候选人姓名", "性别", "入职编制组织", "编制组织",
+                  "入职服务单位", "人员性质", "入职部门", "直属上级", "岗位类型",
+                  "职位", "建议职级", "管理序列", "办公方式", "办公地区",
+                  "薪资货币", "转正薪资", "试用期", "试用薪资"}
+    lines = []
+    for line in body.splitlines():
+        match = re.match(r"^(\s*([^:：]+)[:：]\s*)(.*)$", line)
+        key = match.group(2).strip() if match else ""
+        if key in structural and fields.get(key):
+            line = match.group(1) + fields[key]
+        lines.append(line)
+    body = "\n".join(lines)
     supplement = (
         "3️⃣招聘信息\n"
         f"招聘渠道：{fields.get('招聘渠道', '')}\n"

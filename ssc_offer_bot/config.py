@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""按 BOT_ENV 加载测试或生产配置；未设置时保持现有生产行为。"""
+"""按 BOT_ENV 加载测试或生产配置，并在启动前执行防误发检查。"""
 
 import importlib
 import os
@@ -7,21 +7,13 @@ import os
 from dotenv import load_dotenv
 
 
-# 先记住启动命令显式传入的 BOT_ENV；基础 .env 只用于兼容旧生产配置。
-_explicit_environment = os.environ.get("BOT_ENV", "").strip()
-load_dotenv()
-
-_environment = (
-    _explicit_environment or os.environ.get("BOT_ENV", "prod")
-).strip().casefold()
+# 默认 test 是故意的：漏配 BOT_ENV 时宁可启动失败，也不能误发生产群。
+_environment = os.environ.get("BOT_ENV", "test").strip().casefold()
 if _environment not in {"test", "prod"}:
     raise RuntimeError("BOT_ENV 只能是 test 或 prod")
 
-# 环境专用文件必须覆盖基础 .env，否则 test 可能错误复用生产 Session。
-load_dotenv(
-    os.path.join(os.path.dirname(__file__), f".env.{_environment}"),
-    override=True,
-)
+_env_file = os.path.join(os.path.dirname(__file__), f".env.{_environment}")
+load_dotenv(_env_file, override=False)
 os.environ["BOT_ENV"] = _environment
 
 _profile = importlib.import_module(f"config_{_environment}")
@@ -29,11 +21,7 @@ for _name in dir(_profile):
     if _name.isupper():
         globals()[_name] = getattr(_profile, _name)
 
-# 新增的环境隔离开关集中在这里，为旧生产配置提供兼容默认值。
 ENVIRONMENT = _environment
-EXPECTED_SSC_USER_ID = int(os.environ.get("EXPECTED_SSC_USER_ID", "0"))
-if ENVIRONMENT == "test" and not EXPECTED_SSC_USER_ID:
-    raise RuntimeError("测试环境必须在 .env.test 设置 EXPECTED_SSC_USER_ID")
 OFFER_APPROVAL_CODE = "测试1" if ENVIRONMENT == "test" else "1"
 REGULARIZATION_APPROVAL_CODE = "测试2" if ENVIRONMENT == "test" else "2"
 ANNIVERSARY_APPROVAL_CODE = "测试3" if ENVIRONMENT == "test" else "3"
@@ -51,3 +39,16 @@ ALLOWED_DESTINATION_IDS = frozenset({
     GROUP_RECRUIT,
     *(rule["chat_id"] for rule in ANNIVERSARY_GROUP_RULES),
 })
+
+if ENVIRONMENT == "test":
+    _test_chat_ids = ALLOWED_DESTINATION_IDS | {
+        GROUP_HRBP,
+        GROUP_REGULARIZATION_TRIGGER,
+        GROUP_ANNIVERSARY_TRIGGER,
+    }
+    _unsafe = _test_chat_ids & PRODUCTION_CHAT_IDS
+    if _unsafe:
+        raise RuntimeError(f"测试环境包含生产群 {_unsafe}，已拒绝启动")
+
+if GROUP_HRBP in ALLOWED_DESTINATION_IDS:
+    raise RuntimeError("来源群不能同时成为自动发送目标群")

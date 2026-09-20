@@ -16,6 +16,17 @@ import re
 import unicodedata
 
 
+def mentions_ssc(message):
+    """两套环境均识别指定SSC，不依赖当前账号的 mentioned 标记。"""
+    if any(getattr(entity, "user_id", None) == 8853414240
+           for entity in (getattr(message, "entities", None) or [])):
+        return True
+    return bool(re.search(
+        r"(?<![A-Za-z0-9_@])@ffuuyao(?![A-Za-z0-9_])",
+        getattr(message, "raw_text", "") or "", re.I,
+    ))
+
+
 def is_offer_message(text: str) -> bool:
     compact = re.sub(r"\s+", "", text).casefold()
     return (("【offer】" in compact and "附件简历" in compact)
@@ -43,7 +54,7 @@ def is_approval(text: str) -> bool:
     return bool(re.fullmatch(prefix + token + r"(?:[,，。!！、]*" + token + r")*" + suffix, value))
 
 # 字段名允许中文/英文/数字/下划线/斜杠，长度限制避免误把正文长句当成字段名
-_FIELD_PATTERN = re.compile(r"^\s*(?:[0-9０-９]+\s*[.．、)）]\s*)?([\u4e00-\u9fa5A-Za-z0-9_/]{1,20}?)[:：]\s*(.+?)\s*$")
+_FIELD_PATTERN = re.compile(r"^\s*(?:[0-9０-９]+\s*[.．、)）]\s*)?([\u4e00-\u9fa5A-Za-z0-9_/]{1,20}?)\s*[:：]\s*(.+?)\s*$")
 
 
 def parse_kv_fields(text: str) -> dict:
@@ -52,6 +63,8 @@ def parse_kv_fields(text: str) -> dict:
     if not text:
         return fields
     for line in text.splitlines():
+        line = ''.join(c for c in unicodedata.normalize('NFKC', line)
+                       if unicodedata.category(c) != 'Cf')
         m = _FIELD_PATTERN.match(line)
         if m:
             key = m.group(1).strip()

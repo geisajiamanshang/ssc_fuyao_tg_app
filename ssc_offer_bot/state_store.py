@@ -88,21 +88,36 @@ class StateStore:
                 return name, rec
         return None, None
 
-    def find_pending_for_recruiter(self, recruiter_username: str, text: str):
+    def find_pending_for_recruiter(self, recruiter_username: str, text: str, recruiter_id=None):
         """
         在招聘私聊消息里，找出这条消息对应的是哪个候选人。
         优先用候选人姓名是否出现在私聊文本里来判断；
         如果这个招聘只有一个候选人在等待，就直接用那一条。
         """
+        import unicodedata
+        from parsers import parse_kv_fields, get_field
+        def normalized(value):
+            return "".join(unicodedata.normalize("NFKC", value or "").casefold().split()).lstrip("@")
         candidates = [
             (name, rec)
             for name, rec in self.data.items()
-            if rec.get("recruiter_username") == recruiter_username
+            if (rec.get("recruiter_id") == recruiter_id if rec.get("recruiter_id")
+                else bool(recruiter_username) and normalized(rec.get("recruiter_username")) == normalized(recruiter_username))
             and rec.get("stage") == "waiting_recruiter_dm"
         ]
-        for name, rec in candidates:
-            if name and name in text:
-                return name, rec
+        fields = parse_kv_fields(text)
+        code = get_field(fields, "候选人编码")
+        explicit_name = get_field(fields, "简历名", "候选人姓名")
+        if code:
+            candidates = [(name, rec) for name, rec in candidates if normalized(code) in {
+                normalized(get_field(rec.get("raw_fields", {}), "候选人编码")),
+                normalized(get_field(rec.get("resume_fields", {}), "候选人编码"))}]
+        if explicit_name:
+            candidates = [(name, rec) for name, rec in candidates if normalized(name) == normalized(explicit_name)]
+        elif not code:
+            mentioned = [(name, rec) for name, rec in candidates if normalized(name) in normalized(text)]
+            if mentioned:
+                candidates = mentioned
         if len(candidates) == 1:
             return candidates[0]
         return None, None

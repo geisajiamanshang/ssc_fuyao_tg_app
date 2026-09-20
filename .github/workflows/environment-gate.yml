@@ -1,0 +1,26 @@
+name: environment-gate
+
+on:
+  push:
+    branches: [test]
+  pull_request:
+    branches: [main]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ssc_offer_bot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Run all tests
+        env:
+          TG_API_ID: "1"
+          TG_API_HASH: test-only
+          EXPECTED_SSC_USER_ID: "9001"
+        run: python -m unittest discover -p 'test_*.py'
