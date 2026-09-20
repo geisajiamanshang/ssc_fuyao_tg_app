@@ -61,7 +61,8 @@ class IntakeTests(IsolatedAsyncioTestCase):
                    log=logging.getLogger('test'),
                    build_offer_confirm_message=lambda org, body: org + '\n' + body,
                    config=NS(GROUP_LEADERSHIP=-1, ALLOWED_DESTINATION_IDS={-1},
-                             OFFER_APPROVAL_CODE='测试1', ENVIRONMENT='test'))
+                             OFFER_APPROVAL_CODE='测试1', ENVIRONMENT='test',
+                             EXCLUDED_CHAT_IDS=frozenset()))
         exec(compile(ast.Module(body=functions, type_ignores=[]), 'main.py', 'exec'), env)
         events = [NS(message=NS(id=i, mentioned=False, media=None,
                                raw_text=f'【Offer】+附件简历\n候选人姓名：小{name}\n入职编制组织：技术中心\n@ffuuyao 请审批'),

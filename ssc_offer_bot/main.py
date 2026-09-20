@@ -118,6 +118,8 @@ async def forward_onboarding_to_hrgs(message, chat_id):
 
 @client.on(events.NewMessage(chats=config.GROUP_LEADERSHIP, outgoing=True))
 async def on_ssc_onboarding_published(event):
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
     await forward_onboarding_to_hrgs(event.message, event.chat_id)
 
 
@@ -244,6 +246,8 @@ async def _send_saved_text(reviewer_id, text):
 
 @client.on(events.NewMessage(chats=config.GROUP_REGULARIZATION_TRIGGER))
 async def on_regularization_trigger(event):
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
     text = event.raw_text or ""
     normalized = unicodedata.normalize("NFKC", text)
     if (not config.ALLOW_MANUAL_TRIGGERS
@@ -349,6 +353,8 @@ async def on_regularization_trigger(event):
 
 @client.on(events.NewMessage(chats=config.GROUP_ANNIVERSARY_TRIGGER))
 async def on_anniversary_trigger(event):
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
     text = event.raw_text or ""
     normalized = unicodedata.normalize("NFKC", text)
     if (not config.ALLOW_MANUAL_TRIGGERS
@@ -458,6 +464,8 @@ def get_leader_tags(org_unit: str, dept_text: str) -> list:
 # ==================== 场景一：HRBP群 -> 联合管理工作群 ====================
 @client.on(events.NewMessage(chats=config.GROUP_HRBP))
 async def on_hrbp_offer(event):
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
     msg = event.message
     if not mentions_ssc(msg):
         return
@@ -547,6 +555,8 @@ async def approval_target(event):
 
 @client.on(events.NewMessage(chats=config.GROUP_LEADERSHIP))
 async def on_leadership_reply(event):
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
     async with approval_lock:
         await process_leadership_reply(event)
 
