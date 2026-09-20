@@ -83,3 +83,21 @@ class EnvironmentConfigTests(TestCase):
             *(rule["chat_id"] for rule in test.ANNIVERSARY_GROUP_RULES),
         }
         self.assertTrue(destinations.isdisjoint(prod.PRODUCTION_CHAT_IDS))
+
+    def test_test_chat_ids_cover_all_test_groups(self):
+        test_groups = {
+            test.GROUP_HRBP, test.GROUP_LEADERSHIP, test.GROUP_RECRUIT,
+            test.GROUP_REGULARIZATION_TRIGGER, test.GROUP_ANNIVERSARY_TRIGGER,
+            *(rule["chat_id"] for rule in test.ANNIVERSARY_GROUP_RULES),
+        }
+        self.assertTrue(test_groups.issubset(test.TEST_CHAT_IDS))
+        self.assertTrue(test.TEST_CHAT_IDS.isdisjoint(prod.PRODUCTION_CHAT_IDS))
+
+    def test_production_process_ignores_test_group_messages(self):
+        os.environ["BOT_ENV"] = "prod"
+        selected = importlib.reload(importlib.import_module("config"))
+        self.assertEqual(selected.EXCLUDED_CHAT_IDS, test.TEST_CHAT_IDS)
+        self.assertIn(test.GROUP_REGULARIZATION_TRIGGER, selected.EXCLUDED_CHAT_IDS)
+        os.environ["BOT_ENV"] = "test"
+        selected = importlib.reload(selected)
+        self.assertEqual(selected.EXCLUDED_CHAT_IDS, frozenset())
