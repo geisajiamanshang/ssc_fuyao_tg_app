@@ -27,6 +27,10 @@ class MemoryStore:
     def __init__(self):
         self.data = {}
 
+    def find_by_field(self, field, value):
+        return next(((key, rec) for key, rec in self.data.items()
+                     if rec.get(field) == value), (None, None))
+
     def set(self, key, value):
         self.data[key] = value
 
@@ -61,10 +65,13 @@ class IntakeTests(IsolatedAsyncioTestCase):
         exec(compile(ast.Module(body=functions, type_ignores=[]), 'main.py', 'exec'), env)
         events = [NS(message=NS(id=i, mentioned=False, media=None,
                                raw_text=f'【Offer】+附件简历\n候选人姓名：小{name}\n入职编制组织：技术中心\n@ffuuyao 请审批'),
-                     sender_id=8, get_sender=AsyncMock(return_value=NS(username='bp')))
+                     chat_id=-2, sender_id=8, get_sender=AsyncMock(return_value=NS(username='bp')))
                   for i, name in enumerate('ABC', 1)]
         await asyncio.gather(*(env['on_hrbp_offer'](event) for event in events))
         self.assertEqual(len(saved), 3)
         self.assertEqual({dest for dest, _ in saved}, {9})
         self.assertEqual({r['candidate'] for r in outbox.data.values()}, {'小A', '小B', '小C'})
         self.assertTrue(all(r['status'] == 'pending' for r in outbox.data.values()))
+
+        await asyncio.gather(*(env['on_hrbp_offer'](event) for event in events))
+        self.assertEqual(len(saved), 3)
