@@ -218,6 +218,8 @@ async def on_ssc_send_approval(event):
                                offer_chat_id=item["destination"], approvals={})
             state.update(item["candidate"], **updates)
             outbox.update(key, status="sent", sent_msg_id=sent.id)
+            if updates.get("stage") == "waiting_recruiter_dm":
+                asyncio.create_task(replay_pending_recruiter_dm(item["candidate"]))
             log.info("[SSC审批] 已发送至群=%s msg_id=%s", item["destination"], sent.id)
             # 主动覆盖程序发布的消息；同一消息的监听回调由持久化记录去重。
             await forward_onboarding_to_hrgs(sent, item["destination"])
@@ -806,9 +808,10 @@ async def process_batch_final(event):
 
 
 def matches_recruit_candidate(text: str, candidate_name: str, candidate_code: str = "") -> bool:
-    """招聘简历无需Offer标题；编码优先，姓名忽略空格与大小写。"""
+    """简历必须含编码；同时校验姓名，防止测试简历复用编码导致串人。"""
     def normalized(value):
-        return "".join(unicodedata.normalize("NFKC", value or "").casefold().split())
+        return "".join(c for c in unicodedata.normalize("NFKC", value or "").casefold()
+                       if not c.isspace() and unicodedata.category(c) != 'Cf')
 
     fields = parse_kv_fields(text)
     resume_code = get_field(fields, "候选人编码")
@@ -816,7 +819,9 @@ def matches_recruit_candidate(text: str, candidate_name: str, candidate_code: st
         return False
     resume_name = get_field(fields, "简历名", "候选人姓名")
     if candidate_code and resume_code:
-        return normalized(candidate_code) == normalized(resume_code)
+        return (normalized(candidate_code) == normalized(resume_code)
+                and bool(normalized(candidate_name))
+                and normalized(candidate_name) == normalized(resume_name))
     return bool(normalized(candidate_name) and normalized(resume_name)
                 and normalized(candidate_name) == normalized(resume_name))
 
@@ -825,10 +830,10 @@ async def handle_final_approved(candidate_name: str, rec: dict):
     """终审通过后：去招聘群搜同名候选人的简历消息，回复它。"""
     resume_msg = None
     candidate_code = get_field(rec.get("raw_fields", {}), "候选人编码")
-    # 编码优先；姓名搜索失败时扫描近期消息，兼容Telegram索引和空格差异。
+    # 搜索索引未命中时分页遍历历史，避免格式差异和旧简历超出固定条数上限。
     searches = list(dict.fromkeys(value for value in (candidate_code, candidate_name) if value)) + [None]
     for search in searches:
-        kwargs = {"search": search, "limit": 100} if search else {"limit": 1000}
+        kwargs = {"search": search, "limit": None} if search else {"limit": None}
         async for m in client.iter_messages(config.GROUP_RECRUIT, **kwargs):
             if matches_recruit_candidate(m.raw_text or "", candidate_name, candidate_code):
                 resume_msg = m
@@ -840,7 +845,10 @@ async def handle_final_approved(candidate_name: str, rec: dict):
         log.warning(f"[场景2] 终审通过，但在招聘群未找到候选人「{candidate_name}」的简历消息，需要人工处理")
         state.update(candidate_name, stage="final_approved_no_resume_found")
         reviewer = await get_ssc_reviewer()
-        await client.send_message(reviewer.id, candidate_name + "-终审已通过，但未找到含候选人编码的匹配简历，请核对招聘群记录", parse_mode=None)
+        await client.send_message(reviewer.id,
+            candidate_name + "-终审已通过，但未找到编码和姓名匹配的简历。"
+            + f"查询招聘群ID：{config.GROUP_RECRUIT}；候选人编码：{candidate_code or '未填写'}。"
+            + "请核对群ID及简历字段；修正后在收藏夹发送“重试招聘通知”。", parse_mode=None)
         return
 
     recruiter = await resume_msg.get_sender()
@@ -866,7 +874,42 @@ async def handle_final_approved(candidate_name: str, rec: dict):
     log.info("[场景2] %s 终审通过，招聘群通知等待SSC审批", candidate_name)
 
 
+@client.on(events.NewMessage())
+async def retry_recruit_notifications(event):
+    if (event.raw_text or '').strip() != '重试招聘通知':
+        return
+    me = await client.get_me()
+    if not event.is_private or event.chat_id != me.id or event.sender_id != me.id:
+        return
+    async with approval_lock:
+        for name, rec in list(state.all().items()):
+            if rec.get('stage') != 'final_approved_no_resume_found':
+                continue
+            if not all(rec.get('approvals', {}).get(role) for role in approval_roles(rec.get('org_unit'))):
+                continue
+            try:
+                await handle_final_approved(name, rec)
+            except Exception:
+                log.exception('[招聘重试] %s 处理失败', name)
+                await client.send_message(me.id, name + '-招聘通知重试失败，请查看日志', parse_mode=None)
+
+
 # ==================== 场景三：招聘私聊补充信息 -> 发布入职确认 ====================
+async def replay_pending_recruiter_dm(name):
+    rec = state.get(name) or {}
+    pending = rec.get('pending_recruiter_dm')
+    if not pending or rec.get('stage') != 'waiting_recruiter_dm':
+        return
+    try:
+        message = await client.get_messages(pending['sender_id'], ids=pending['message_id'])
+        if message:
+            from types import SimpleNamespace
+            await on_private_message(SimpleNamespace(is_private=True, raw_text=message.raw_text,
+                message=message, get_sender=message.get_sender))
+    except Exception:
+        log.exception('[入职确认] %s 提前私聊恢复失败', name)
+
+
 @client.on(events.NewMessage(incoming=True))
 async def on_private_message(event):
     if not event.is_private:
@@ -880,7 +923,28 @@ async def on_private_message(event):
     sender_username = sender.username or ""
     candidate_name, rec = state.find_pending_for_recruiter(sender_username, text, sender.id)
     if not rec:
-        log.info(f"[场景3] 收到来自 @{sender_username} 的私聊消息，但未匹配到待处理候选人，已忽略")
+        fields = parse_kv_fields(text)
+        name = get_field(fields, '候选人姓名', '简历名')
+        known = state.get(name) if name else None
+        if not known:
+            return
+        reviewer = await get_ssc_reviewer()
+        # 招聘通知待SSC审批时，收件人身份已保存在该草稿的updates中。
+        pending_draft = next((r for r in outbox.all().values()
+            if r.get('candidate') == name and r.get('status') in {'pending', 'sending'}
+            and r.get('updates', {}).get('stage') == 'waiting_recruiter_dm'
+            and r.get('updates', {}).get('recruiter_id') == sender.id), None)
+        if known.get('stage') == 'waiting_ssc_recruit_reply' and pending_draft:
+            state.update(name, pending_recruiter_dm={'sender_id':sender.id,
+                                                   'message_id':event.message.id})
+            notice = name + '-已收到招聘补充信息，等待招聘通知草稿通过“测试1”；放行后自动生成入职确认。'
+        elif known.get('stage') in {'waiting_ssc_onboarding', 'done'}:
+            return
+        else:
+            notice = (name + '-收到招聘补充信息，但未进入匹配的待入职阶段。'
+                      + f"当前阶段：{known.get('stage', '未知')}；发送者ID：{sender.id}。"
+                      + '请先处理招聘通知并确认发送者与简历发布者一致，完成后请招聘重发补充信息。')
+        await client.send_message(reviewer.id, notice, parse_mode=None)
         return
 
     dm_fields = parse_kv_fields(text)
@@ -904,11 +968,16 @@ async def on_private_message(event):
         offer_text = (original_offer.raw_text or "") if original_offer else ""
     if not offer_text:
         log.warning("[场景3] 原Offer消息不可用，已停止生成入职确认：%s", candidate_name)
+        reviewer = await get_ssc_reviewer()
+        await client.send_message(reviewer.id, candidate_name + '-入职确认未生成：原Offer消息不可用', parse_mode=None)
         return
     original_fields = parse_kv_fields(offer_text)
     org_unit = get_field(merged_fields, "入职编制组织", "编制组织") or rec["org_unit"]
     leaders = get_leader_tags(org_unit, get_field(merged_fields, "入职部门"))
     if not leaders:
+        reviewer = await get_ssc_reviewer()
+        await client.send_message(reviewer.id, candidate_name + '-入职确认未生成：未匹配通知名单；编制组织：' + org_unit
+                                  + '；入职部门：' + get_field(merged_fields, '入职部门'), parse_mode=None)
         return
     final_text = build_onboarding_confirm_message(org_unit, merged_fields, leaders, offer_text)
 
@@ -920,6 +989,7 @@ async def on_private_message(event):
         updates={"stage": "done"}, kind="onboarding",
     )
     log.info("[场景3] %s 入职确认等待SSC审批", candidate_name)
+    state.update(candidate_name, pending_recruiter_dm=None)
 
 
 async def main():

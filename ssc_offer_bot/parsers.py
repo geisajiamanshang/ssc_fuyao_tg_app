@@ -54,7 +54,7 @@ def is_approval(text: str) -> bool:
     return bool(re.fullmatch(prefix + token + r"(?:[,，。!！、]*" + token + r")*" + suffix, value))
 
 # 字段名允许中文/英文/数字/下划线/斜杠，长度限制避免误把正文长句当成字段名
-_FIELD_PATTERN = re.compile(r"^\s*(?:[0-9０-９]+\s*[.．、)）]\s*)?([\u4e00-\u9fa5A-Za-z0-9_/]{1,20}?)[:：]\s*(.+?)\s*$")
+_FIELD_PATTERN = re.compile(r"^\s*(?:[0-9０-９]+\s*[.．、)）]\s*)?([\u4e00-\u9fa5A-Za-z0-9_/]{1,20}?)\s*[:：]\s*(.+?)\s*$")
 
 
 def parse_kv_fields(text: str) -> dict:
@@ -63,6 +63,8 @@ def parse_kv_fields(text: str) -> dict:
     if not text:
         return fields
     for line in text.splitlines():
+        line = ''.join(c for c in unicodedata.normalize('NFKC', line)
+                       if unicodedata.category(c) != 'Cf')
         m = _FIELD_PATTERN.match(line)
         if m:
             key = m.group(1).strip()

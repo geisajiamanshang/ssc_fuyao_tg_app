@@ -112,9 +112,9 @@ class StateStore:
             candidates = [(name, rec) for name, rec in candidates if normalized(code) in {
                 normalized(get_field(rec.get("raw_fields", {}), "候选人编码")),
                 normalized(get_field(rec.get("resume_fields", {}), "候选人编码"))}]
-        elif explicit_name:
+        if explicit_name:
             candidates = [(name, rec) for name, rec in candidates if normalized(name) == normalized(explicit_name)]
-        else:
+        elif not code:
             mentioned = [(name, rec) for name, rec in candidates if normalized(name) in normalized(text)]
             if mentioned:
                 candidates = mentioned
