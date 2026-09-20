@@ -560,11 +560,19 @@ def role_username(role):
     }[role].strip().lstrip("@").casefold()
 
 
-def approval_role(sender):
+def approval_role(sender, rec=None, msg_id=None):
     username = (getattr(sender, "username", None) or "").casefold()
     matches = [r for r in ("first", "second", "final")
                if username and username == role_username(r)]
-    # 配置重叠时不能把同一次发言当作多级审批。
+    if rec is not None:
+        matches = [r for r in approval_roles(rec.get("org_unit")) if r in matches]
+        evidence = rec.get("approvals", {})
+        # 历史回放或重复事件不能将同一次发言再次计为另一级审批。
+        for role in matches:
+            if evidence.get(role, {}).get("message_id") == msg_id:
+                return role
+        if len(matches) > 1:
+            return next((r for r in matches if not evidence.get(r)), None)
     return matches[0] if len(matches) == 1 else None
 
 
@@ -638,9 +646,6 @@ async def recover_approval_evidence(event, records):
         if not is_approval(message.raw_text or ""):
             continue
         sender = await message.get_sender()
-        role = approval_role(sender)
-        if not role:
-            continue
         if batch_approval(message.raw_text):
             zone = ZoneInfo(config.DAILY_REPORT_TIMEZONE)
             targets = []
@@ -657,7 +662,11 @@ async def recover_approval_evidence(event, records):
             name, _ = await approval_target(SimpleNamespace(message=message))
             targets = [(name, by_name[name])] if name in by_name else []
         for name, rec in targets:
-            apply_approval_evidence(rec, role, message.id, message.sender_id)
+            role = ("final" if batch_approval(message.raw_text) and
+                    (getattr(sender, "username", "") or "").casefold() == role_username("final")
+                    else approval_role(sender, rec, message.id))
+            if role:
+                apply_approval_evidence(rec, role, message.id, message.sender_id)
     for name, rec in records:
         state.update(name, approvals=rec.get("approvals", {}))
 
@@ -695,10 +704,11 @@ async def advance_offer(name, rec):
 
 async def process_leadership_reply(event):
     msg = event.message
-    role = approval_role(await event.get_sender())
-    if not role or not is_approval(msg.raw_text or ""):
+    sender = await event.get_sender()
+    username = (getattr(sender, "username", "") or "").casefold()
+    if username not in {role_username(r) for r in ("first", "second", "final")} or not is_approval(msg.raw_text or ""):
         return
-    if batch_approval(msg.raw_text) and role == "final":
+    if batch_approval(msg.raw_text) and username == role_username("final"):
         await process_batch_final(event)
         return
     if batch_approval(msg.raw_text):
@@ -713,14 +723,16 @@ async def process_leadership_reply(event):
     for name, rec in records:
         try:
             rec["approvals"] = dict(state.get(name).get("approvals", {}))
+            role = approval_role(sender, rec, msg.id)
+            if not role:
+                continue
             missing, changed = apply_approval_evidence(rec, role, msg.id, event.sender_id)
             if changed:
                 state.update(name, approvals=rec["approvals"], last_approval_msg_id=msg.id)
             if missing:
                 await notify_missing(name, missing)
                 continue
-            if not changed:
-                continue
+            # 回放可能已补齐全部审批，仍需恢复未完成的下一步；advance_offer负责去重。
             state.update(name, approvals=rec["approvals"], last_approval_msg_id=msg.id)
             await advance_offer(name, rec)
         except Exception:
