@@ -109,9 +109,15 @@ class GreetingAndDepartmentTests(TestCase):
 
     def test_greeting_for_name_matches_real_notice_format(self):
         greeting = greeting_for_name(self.sections["转正通知"], "比尔")
-        self.assertIn("祝贺 比尔 @guzhi2099", greeting)
+        self.assertTrue(greeting.startswith("祝贺 比尔 @guzhi2099"))
+        self.assertNotIn("🆗️", greeting)
         self.assertIn("2026-09-21", greeting)
         self.assertNotIn("三风", greeting)
+
+    def test_greeting_without_leading_symbol_is_unchanged(self):
+        section = "祝贺 善知 @shanzhi_2222，表现优秀，通过试用期考核评估，于2026-09-06 起正式转正。\n恭喜转正，未来可期！👏👏👏"
+        greeting = greeting_for_name(section, "善知")
+        self.assertTrue(greeting.startswith("祝贺 善知 @shanzhi_2222"))
 
     def test_department_for_name_reads_real_sync_field(self):
         self.assertEqual(

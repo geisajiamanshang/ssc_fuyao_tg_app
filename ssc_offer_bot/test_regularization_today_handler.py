@@ -133,7 +133,8 @@ class RegularizationTodayHandlerTests(IsolatedAsyncioTestCase):
         self.assertEqual(len(env['_sent']), 1)
         draft_recipient, text, file = env['_sent'][0]
         self.assertEqual(draft_recipient, 9)
-        self.assertIn('祝贺 比尔 @guzhi2099', text)
+        self.assertTrue(text.startswith('祝贺 比尔 @guzhi2099'))
+        self.assertNotIn('🆗️', text)
         self.assertEqual(file, 'poster-for-比尔')
 
         outbox_record = next(iter(env['outbox'].all().values()))

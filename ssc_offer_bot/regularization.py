@@ -16,6 +16,7 @@ _SECTION_RE = re.compile(
 _BLOCK_RE = re.compile(r"(?m)^\s*(?:—{2,}|-{3,})\s*$")
 _NAME_RE = re.compile(r"花名\s*[:：]\s*([^\s,，;；]+)")
 _DEPARTMENT_RE = re.compile(r"部门-小组\s*[:：]\s*([^\n]+)")
+_GREETING_LEADING_RE = re.compile(r"^[^\n]*?(?=祝贺)")
 _REMINDER_FOOTER_RE = re.compile(r"(?s)\n*如需延期，.*\Z")
 _TRIGGER_SEPARATOR_RE = re.compile(r"[\s\-‐‑‒–—―－]+")
 _NORMALIZE_RE = re.compile(r"[\s/_\-—]+")
@@ -105,10 +106,14 @@ def today_trigger_scope(text, keyword):
 
 
 def greeting_for_name(notice_section_text, name):
-    """从【转正通知】区块中取指定花名的祝贺正文，用作海报的图片说明。"""
+    """从【转正通知】区块中取指定花名的祝贺正文，用作海报的图片说明。
+    原文有的条目在“祝贺”前带🆗️等符号，发到全员群前去掉，只保留“祝贺”开始的正文。"""
     blocks = split_blocks(notice_section_text)
     matches = [block for block in blocks if _block_has_name("转正通知", block, name)]
-    return matches[-1].strip() if matches else ""
+    if not matches:
+        return ""
+    greeting = matches[-1].strip()
+    return _GREETING_LEADING_RE.sub("", greeting, count=1)
 
 
 def department_for_name(sync_section_text, name):
