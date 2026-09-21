@@ -433,6 +433,7 @@ async def on_regularization_today_trigger(event):
                     updates={"stage": "regularization_today_sent", "name": name},
                     kind="message",
                     approval_code=config.REGULARIZATION_TODAY_APPROVAL_CODE,
+                    delete_draft_after_send=True,
                 )
                 drafts.append({"name": name, "draft_id": draft.id, "destination": destination})
 

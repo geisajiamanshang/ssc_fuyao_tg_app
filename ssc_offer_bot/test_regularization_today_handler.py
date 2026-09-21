@@ -157,7 +157,7 @@ class RegularizationTodayHandlerTests(IsolatedAsyncioTestCase):
         poster_record = next(r for r in records if r['approval_code'] == '测试4')
         sync_record = next(r for r in records if r['approval_code'] == '测试4.1')
         self.assertEqual(poster_record['destination'], -5375721803)
-        self.assertFalse(poster_record['delete_draft_after_send'])
+        self.assertTrue(poster_record['delete_draft_after_send'])
         self.assertEqual(sync_record['destination'], -5258992607)
         self.assertTrue(sync_record['delete_draft_after_send'])
 
@@ -274,22 +274,48 @@ class SscApprovalDeletesDraftTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.deleted, [(9, [200])])
         self.assertEqual(outbox.get('200')['status'], 'sent')
 
-    async def test_does_not_delete_draft_when_flag_absent(self):
+    async def test_poster_draft_also_deleted_after_测试4_approval(self):
+        # 用户要求：测试4 审核通过、海报和祝贺转发到全员群后，收藏夹里的这条草稿也要删掉。
         outbox = MemoryStore()
-        outbox.set('300', {
-            'draft_id': 300, 'destination': -5375721803, 'reply_to': None,
+        outbox.set('400', {
+            'draft_id': 400, 'destination': -5375721803, 'reply_to': None,
             'candidate': 'regularization_today:today:-1:1:比尔',
             'expected_stage': 'waiting_ssc_regularization_today',
             'updates': {'stage': 'regularization_today_sent', 'name': '比尔'},
             'id_field': None, 'kind': 'message', 'status': 'pending',
-            'review_chat_id': 9, 'approval_code': '测试4.1',
+            'review_chat_id': 9, 'approval_code': '测试4',
+            'delete_draft_after_send': True,
         })
         state = MemoryStore()
         state.set('regularization_today:today:-1:1:比尔',
                    {'stage': 'waiting_ssc_regularization_today'})
         env = self.build_approval_env(outbox, state)
+        env['config'].APPROVAL_CODES = frozenset({'测试4'})
 
-        event = NS(chat_id=9, sender_id=9, is_private=True, raw_text='测试4.1',
+        event = NS(chat_id=9, sender_id=9, is_private=True, raw_text='测试4',
+                    message=NS(id=401, reply_to_msg_id=None))
+        await env['on_ssc_send_approval'](event)
+
+        self.assertEqual(self.deleted, [(9, [400])])
+        self.assertEqual(outbox.get('400')['status'], 'sent')
+
+    async def test_does_not_delete_draft_when_flag_absent(self):
+        # 代表未设置 delete_draft_after_send 的老流程（如 offer 群消息），默认不删草稿。
+        outbox = MemoryStore()
+        outbox.set('300', {
+            'draft_id': 300, 'destination': -5375721803, 'reply_to': None,
+            'candidate': 'offer:some-candidate',
+            'expected_stage': 'waiting_ssc_offer',
+            'updates': {'stage': 'offer_sent'},
+            'id_field': None, 'kind': 'message', 'status': 'pending',
+            'review_chat_id': 9, 'approval_code': '测试1',
+        })
+        state = MemoryStore()
+        state.set('offer:some-candidate', {'stage': 'waiting_ssc_offer'})
+        env = self.build_approval_env(outbox, state)
+        env['config'].APPROVAL_CODES = frozenset({'测试1'})
+
+        event = NS(chat_id=9, sender_id=9, is_private=True, raw_text='测试1',
                     message=NS(id=301, reply_to_msg_id=None))
         await env['on_ssc_send_approval'](event)
 
