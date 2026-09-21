@@ -2,14 +2,15 @@ import ast
 import asyncio
 import logging
 import unicodedata
-from datetime import date
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock
 
+from approval_queue import select_pending
 from regularization import (
     department_for_name,
+    extract_section_for_names,
     greeting_for_name,
     match_department_group,
     names_from_trigger,
@@ -17,7 +18,6 @@ from regularization import (
     today_trigger_matches,
     today_trigger_scope,
 )
-from state_store import StateStore
 
 
 MONTHLY_TEXT = """【转正信息同步】
@@ -75,6 +75,23 @@ class MemoryStore:
         return self.data
 
 
+def base_config(**overrides):
+    fields = dict(
+        EXCLUDED_CHAT_IDS=frozenset(), ALLOW_MANUAL_TRIGGERS=True,
+        REGULARIZATION_TRIGGER_BOT_ID=8416618309,
+        REGULARIZATION_TODAY_TRIGGER_KEYWORD='转正提醒-恒睿-今日转正',
+        DAILY_REPORT_TIMEZONE='Asia/Shanghai',
+        ANNIVERSARY_GROUP_RULES=GROUP_RULES,
+        GROUP_REGULARIZATION_SYNC=-5258992607,
+        ALLOWED_DESTINATION_IDS={-5375721803, -5258992607},
+        REGULARIZATION_TODAY_APPROVAL_CODE='测试4',
+        REGULARIZATION_TODAY_SYNC_APPROVAL_CODE='测试4.1',
+        OFFER_APPROVAL_CODE='测试1', ENVIRONMENT='test',
+    )
+    fields.update(overrides)
+    return NS(**fields)
+
+
 def build_env(**overrides):
     source = ast.parse(Path(__file__).with_name('main.py').read_text())
     functions = [n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
@@ -92,6 +109,7 @@ def build_env(**overrides):
     me = NS(id=9, username='ffuuyao')
     env = dict(
         department_for_name=department_for_name, greeting_for_name=greeting_for_name,
+        extract_section_for_names=extract_section_for_names,
         match_department_group=match_department_group, names_from_trigger=names_from_trigger,
         split_sections=split_sections, today_trigger_matches=today_trigger_matches,
         today_trigger_scope=today_trigger_scope,
@@ -104,16 +122,7 @@ def build_env(**overrides):
             load_month=lambda day: (MONTHLY_TEXT, NS(get=lambda k: 'file-id')),
             find_poster=lambda day, name: f'poster-for-{name}',
         ),
-        config=NS(
-            EXCLUDED_CHAT_IDS=frozenset(), ALLOW_MANUAL_TRIGGERS=True,
-            REGULARIZATION_TRIGGER_BOT_ID=8416618309,
-            REGULARIZATION_TODAY_TRIGGER_KEYWORD='转正提醒-恒睿-今日转正',
-            DAILY_REPORT_TIMEZONE='Asia/Shanghai',
-            ANNIVERSARY_GROUP_RULES=GROUP_RULES,
-            ALLOWED_DESTINATION_IDS={-5375721803},
-            REGULARIZATION_TODAY_APPROVAL_CODE='测试4',
-            OFFER_APPROVAL_CODE='测试1', ENVIRONMENT='test',
-        ),
+        config=base_config(),
     )
     env.update(overrides)
     exec(compile(ast.Module(body=functions, type_ignores=[]), 'main.py', 'exec'), env)
@@ -122,28 +131,45 @@ def build_env(**overrides):
 
 
 class RegularizationTodayHandlerTests(IsolatedAsyncioTestCase):
-    async def test_happy_path_sends_poster_and_greeting_to_matched_group(self):
+    async def test_happy_path_sends_poster_and_sync_info_as_two_drafts(self):
         env = build_env()
         event = NS(chat_id=-1, sender_id=8416618309, raw_text=GROUPED_MESSAGE,
                     message=NS(id=1))
         await env['on_regularization_today_trigger'](event)
 
-        # 草稿先进 SSC 收藏夹（reviewer.id=9），不是直接发到全员群；
-        # 真正的目标群记录在 outbox 里，等 SSC 回复测试4后才会真正转发。
-        self.assertEqual(len(env['_sent']), 1)
-        draft_recipient, text, file = env['_sent'][0]
-        self.assertEqual(draft_recipient, 9)
-        self.assertTrue(text.startswith('祝贺 比尔 @guzhi2099'))
-        self.assertNotIn('🆗️', text)
-        self.assertEqual(file, 'poster-for-比尔')
+        # 两条草稿都先进 SSC 收藏夹（reviewer.id=9），不是直接发到目标群；
+        # 真正的目标群记录在 outbox 里，等 SSC 回复对应审批码后才会真正转发。
+        self.assertEqual(len(env['_sent']), 2)
+        for draft_recipient, _text, _file in env['_sent']:
+            self.assertEqual(draft_recipient, 9)
 
-        outbox_record = next(iter(env['outbox'].all().values()))
-        self.assertEqual(outbox_record['destination'], -5375721803)
-        self.assertEqual(outbox_record['approval_code'], '测试4')
+        poster_recipient, poster_text, poster_file = env['_sent'][0]
+        self.assertTrue(poster_text.startswith('祝贺 比尔 @guzhi2099'))
+        self.assertNotIn('🆗️', poster_text)
+        self.assertEqual(poster_file, 'poster-for-比尔')
+
+        _sync_recipient, sync_text, sync_file = env['_sent'][1]
+        self.assertTrue(sync_text.startswith('【转正信息同步】'))
+        self.assertIn('花名：比尔', sync_text)
+        self.assertIsNone(sync_file)
+
+        records = list(env['outbox'].all().values())
+        poster_record = next(r for r in records if r['approval_code'] == '测试4')
+        sync_record = next(r for r in records if r['approval_code'] == '测试4.1')
+        self.assertEqual(poster_record['destination'], -5375721803)
+        self.assertFalse(poster_record['delete_draft_after_send'])
+        self.assertEqual(sync_record['destination'], -5258992607)
+        self.assertTrue(sync_record['delete_draft_after_send'])
 
         record = env['regularization_events'].get('today:-1:1')
         self.assertEqual(record['status'], 'queued')
-        self.assertEqual(record['drafts'][0]['name'], '比尔')
+
+    async def test_skips_sync_send_when_destination_not_configured(self):
+        env = build_env(config=base_config(GROUP_REGULARIZATION_SYNC=None))
+        event = NS(chat_id=-1, sender_id=8416618309, raw_text=GROUPED_MESSAGE,
+                    message=NS(id=6))
+        await env['on_regularization_today_trigger'](event)
+        self.assertEqual(len(env['_sent']), 1)
 
     async def test_ignores_message_without_today_keyword(self):
         env = build_env()
@@ -153,15 +179,7 @@ class RegularizationTodayHandlerTests(IsolatedAsyncioTestCase):
         self.assertEqual(env['_sent'], [])
 
     async def test_skips_test_group_when_excluded(self):
-        env = build_env(config=NS(
-            EXCLUDED_CHAT_IDS=frozenset({-1}), ALLOW_MANUAL_TRIGGERS=True,
-            REGULARIZATION_TRIGGER_BOT_ID=8416618309,
-            REGULARIZATION_TODAY_TRIGGER_KEYWORD='转正提醒-恒睿-今日转正',
-            DAILY_REPORT_TIMEZONE='Asia/Shanghai', ANNIVERSARY_GROUP_RULES=GROUP_RULES,
-            ALLOWED_DESTINATION_IDS={-5375721803},
-            REGULARIZATION_TODAY_APPROVAL_CODE='测试4',
-            OFFER_APPROVAL_CODE='测试1', ENVIRONMENT='test',
-        ))
+        env = build_env(config=base_config(EXCLUDED_CHAT_IDS=frozenset({-1})))
         event = NS(chat_id=-1, sender_id=8416618309, raw_text=GROUPED_MESSAGE,
                     message=NS(id=3))
         result = await env['on_regularization_today_trigger'](event)
@@ -192,6 +210,88 @@ class RegularizationTodayHandlerTests(IsolatedAsyncioTestCase):
         event = NS(chat_id=-1, sender_id=8416618309, raw_text=GROUPED_MESSAGE,
                     message=NS(id=5))
         await env['on_regularization_today_trigger'](event)
-        self.assertEqual(len(env['_sent']), 1)
+        self.assertEqual(len(env['_sent']), 2)
         await env['on_regularization_today_trigger'](event)
-        self.assertEqual(len(env['_sent']), 1)
+        self.assertEqual(len(env['_sent']), 2)
+
+
+class SscApprovalDeletesDraftTests(IsolatedAsyncioTestCase):
+    def build_approval_env(self, outbox, state):
+        source = ast.parse(Path(__file__).with_name('main.py').read_text())
+        functions = [n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+                     and n.name in {'on_ssc_send_approval', 'get_ssc_reviewer'}]
+        for node in functions:
+            node.decorator_list = []
+
+        sent = []
+        self.deleted = []
+
+        async def send_message(destination, text, **kwargs):
+            sent.append((destination, text))
+            return NS(id=999, date=NS(isoformat=lambda: '2026-09-21'))
+
+        async def get_messages(chat_id, ids):
+            return NS(id=ids, raw_text='【转正信息同步】\n\n花名：比尔', media=None)
+
+        async def delete_messages(chat_id, ids):
+            self.deleted.append((chat_id, ids))
+
+        me = NS(id=9, username='ffuuyao')
+        env = dict(
+            asyncio=asyncio, log=logging.getLogger('test'), select_pending=select_pending,
+            client=NS(get_me=AsyncMock(return_value=me), send_message=send_message,
+                       get_messages=get_messages, delete_messages=delete_messages),
+            outbox=outbox, state=state, ssc_send_lock=asyncio.Lock(),
+            config=NS(APPROVAL_CODES=frozenset({'测试4.1'}), EXCLUDED_CHAT_IDS=frozenset()),
+            forward_onboarding_to_hrgs=AsyncMock(),
+            replay_pending_recruiter_dm=AsyncMock(),
+        )
+        exec(compile(ast.Module(body=functions, type_ignores=[]), 'main.py', 'exec'), env)
+        self._sent = sent
+        return env
+
+    async def test_deletes_draft_after_forwarding_when_flagged(self):
+        outbox = MemoryStore()
+        outbox.set('200', {
+            'draft_id': 200, 'destination': -5258992607, 'reply_to': None,
+            'candidate': 'regularization_today_sync:today:-1:1',
+            'expected_stage': 'waiting_ssc_regularization_today_sync',
+            'updates': {'stage': 'regularization_today_sync_sent', 'names': ['比尔']},
+            'id_field': None, 'kind': 'message', 'status': 'pending',
+            'review_chat_id': 9, 'approval_code': '测试4.1',
+            'delete_draft_after_send': True,
+        })
+        state = MemoryStore()
+        state.set('regularization_today_sync:today:-1:1',
+                   {'stage': 'waiting_ssc_regularization_today_sync'})
+        env = self.build_approval_env(outbox, state)
+
+        event = NS(chat_id=9, sender_id=9, is_private=True, raw_text='测试4.1',
+                    message=NS(id=201, reply_to_msg_id=None))
+        await env['on_ssc_send_approval'](event)
+
+        self.assertEqual(self._sent, [(-5258992607, '【转正信息同步】\n\n花名：比尔')])
+        self.assertEqual(self.deleted, [(9, [200])])
+        self.assertEqual(outbox.get('200')['status'], 'sent')
+
+    async def test_does_not_delete_draft_when_flag_absent(self):
+        outbox = MemoryStore()
+        outbox.set('300', {
+            'draft_id': 300, 'destination': -5375721803, 'reply_to': None,
+            'candidate': 'regularization_today:today:-1:1:比尔',
+            'expected_stage': 'waiting_ssc_regularization_today',
+            'updates': {'stage': 'regularization_today_sent', 'name': '比尔'},
+            'id_field': None, 'kind': 'message', 'status': 'pending',
+            'review_chat_id': 9, 'approval_code': '测试4.1',
+        })
+        state = MemoryStore()
+        state.set('regularization_today:today:-1:1:比尔',
+                   {'stage': 'waiting_ssc_regularization_today'})
+        env = self.build_approval_env(outbox, state)
+
+        event = NS(chat_id=9, sender_id=9, is_private=True, raw_text='测试4.1',
+                    message=NS(id=301, reply_to_msg_id=None))
+        await env['on_ssc_send_approval'](event)
+
+        self.assertEqual(len(self._sent), 1)
+        self.assertEqual(self.deleted, [])

@@ -51,6 +51,7 @@ from regularization import (
     RegularizationDriveRepository,
     build_regularization_messages,
     department_for_name,
+    extract_section_for_names,
     greeting_for_name,
     match_department_group,
     names_from_trigger,
@@ -137,7 +138,7 @@ async def get_ssc_reviewer():
 
 async def queue_group_message(destination, text, *, candidate, expected_stage,
                               updates, id_field=None, kind="message", reply_to=None,
-                              file=None, approval_code=None):
+                              file=None, approval_code=None, delete_draft_after_send=False):
     """所有群消息统一先送收藏夹，由该类消息的审批码放行。"""
     approval_code = approval_code or config.OFFER_APPROVAL_CODE
     if destination not in config.ALLOWED_DESTINATION_IDS:
@@ -152,6 +153,7 @@ async def queue_group_message(destination, text, *, candidate, expected_stage,
             "candidate": candidate, "expected_stage": expected_stage,
             "updates": updates, "id_field": id_field, "kind": kind, "status": "pending",
             "review_chat_id": reviewer.id, "approval_code": str(approval_code),
+            "delete_draft_after_send": delete_draft_after_send,
         })
         state.update(candidate, stage=expected_stage)
         log.info(
@@ -234,6 +236,11 @@ async def on_ssc_send_approval(event):
             log.info("[SSC审批] 已发送至群=%s msg_id=%s", item["destination"], sent.id)
             # 主动覆盖程序发布的消息；同一消息的监听回调由持久化记录去重。
             await forward_onboarding_to_hrgs(sent, item["destination"])
+            if item.get("delete_draft_after_send"):
+                try:
+                    await client.delete_messages(reviewer.id, [item["draft_id"]])
+                except Exception:
+                    log.exception("[SSC审批] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
         except Exception:
             log.exception("[SSC审批] 发送或保存失败，草稿msg_id=%s；结果待核查，不自动重发", item["draft_id"])
 
@@ -428,6 +435,26 @@ async def on_regularization_today_trigger(event):
                     approval_code=config.REGULARIZATION_TODAY_APPROVAL_CODE,
                 )
                 drafts.append({"name": name, "draft_id": draft.id, "destination": destination})
+
+            if config.GROUP_REGULARIZATION_SYNC:
+                sync_text = extract_section_for_names(
+                    "转正信息同步", sections.get("转正信息同步", ""), names
+                )
+                if sync_text:
+                    sync_draft = await queue_group_message(
+                        config.GROUP_REGULARIZATION_SYNC,
+                        sync_text,
+                        candidate=f"regularization_today_sync:{event_key}",
+                        expected_stage="waiting_ssc_regularization_today_sync",
+                        updates={"stage": "regularization_today_sync_sent", "names": names},
+                        kind="message",
+                        approval_code=config.REGULARIZATION_TODAY_SYNC_APPROVAL_CODE,
+                        delete_draft_after_send=True,
+                    )
+                    drafts.append({
+                        "name": "、".join(names), "draft_id": sync_draft.id,
+                        "destination": config.GROUP_REGULARIZATION_SYNC, "kind": "sync",
+                    })
 
             regularization_events.set(event_key, {
                 "status": "queued", "drafts": drafts,

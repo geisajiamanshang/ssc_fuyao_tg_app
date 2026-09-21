@@ -22,6 +22,9 @@ GROUP_REGULARIZATION_TRIGGER = int(os.environ.get(
     "GROUP_REGULARIZATION_TRIGGER", "-1004492520637"
 ))
 GROUP_ANNIVERSARY_TRIGGER = GROUP_REGULARIZATION_TRIGGER
+# 今日转正-转正信息同步的生产目标群，尚未确定，先留空；在此功能合并到 main 前必须补上真实群ID。
+GROUP_REGULARIZATION_SYNC = int(os.environ["GROUP_REGULARIZATION_SYNC"]) \
+    if os.environ.get("GROUP_REGULARIZATION_SYNC") else None
 
 # ========== 审批链角色（填 Telegram 用户名，不带 @） ==========
 LEADER_FIRST = "DaBai10010"        # 一级审批：白一舟，收到"好的"作为一级通过标志
