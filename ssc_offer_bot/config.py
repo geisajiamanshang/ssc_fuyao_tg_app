@@ -38,7 +38,7 @@ DAILY_REPORT_ENABLED = ENVIRONMENT == "prod"
 HRGS_FORWARD_ENABLED = ENVIRONMENT == "prod"
 # 生产只接受指定机器人的提醒；测试群允许SSC人工粘贴提醒做联调。
 ALLOW_MANUAL_TRIGGERS = ENVIRONMENT == "test"
-# 生产环境尚未配置转正信息同步目标群时，GROUP_REGULARIZATION_SYNC 为 None。
+# GROUP_REGULARIZATION_SYNC 未来若在某环境留空（None），下面的条件不会把它计入白名单。
 ALLOWED_DESTINATION_IDS = frozenset({
     GROUP_LEADERSHIP,
     GROUP_RECRUIT,
