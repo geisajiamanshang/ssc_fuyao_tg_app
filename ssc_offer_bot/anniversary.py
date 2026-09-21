@@ -16,6 +16,9 @@ _ANNIVERSARY_HEADING_RE = re.compile(
 )
 _BLOCK_RE = re.compile(r"(?m)^\s*(?:—{2,}|-{3,})\s*$")
 _FIELD_RE = re.compile(r"(?m)^\s*([^\n:：]{1,20})\s*[:：]\s*([^\n]+?)\s*$")
+# 云昭机器人的分组提醒消息把编号和编制组织/部门写在花名后的括号里，
+# 例如“简言（NX0362｜运营中心/技术效能部）”，不是独立的“编制组织：/部门：”字段行。
+_COMPACT_ENTRY_RE = re.compile(r"[（(][^）(]*?[｜|]([^）)]+)[）)]")
 
 
 def _normalized(value):
@@ -61,10 +64,15 @@ def extract_anniversary_greeting(info_text, name):
 
 def parse_anniversary_fields(trigger_text):
     fields = {key.strip(): value.strip() for key, value in _FIELD_RE.findall(trigger_text or "")}
-    return {
-        "org_unit": fields.get("编制组织", "") or fields.get("入职编制组织", ""),
-        "department": fields.get("部门", "") or fields.get("入职部门", ""),
-    }
+    org_unit = fields.get("编制组织", "") or fields.get("入职编制组织", "")
+    department = fields.get("部门", "") or fields.get("入职部门", "")
+    if not org_unit and not department:
+        # 独立字段行不存在时，退回解析紧凑格式括号里的“编制组织/部门”。
+        match = _COMPACT_ENTRY_RE.search(trigger_text or "")
+        if match:
+            org_unit, _, department = match.group(1).strip().partition("/")
+            org_unit, department = org_unit.strip(), department.strip()
+    return {"org_unit": org_unit, "department": department}
 
 
 def anniversary_destination(trigger_text, group_rules):
