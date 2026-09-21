@@ -13,13 +13,14 @@ GROUP_LEADERSHIP = -5365249364
 GROUP_RECRUIT = -5577108580
 GROUP_REGULARIZATION_TRIGGER = -5339407017
 GROUP_ANNIVERSARY_TRIGGER = GROUP_REGULARIZATION_TRIGGER
+GROUP_REGULARIZATION_SYNC = -5258992607
 
 LEADER_FIRST = "haok001"
 LEADER_SECOND_TECH = "haok001"
 LEADER_FINAL = "Zoey95274"
 
 ANNIVERSARY_GROUP_RULES = [
-    {"name": "测试-ACFAN", "keywords": ["ACFAN特战队", "ACFAN"], "chat_id": -5375721803},
+    {"name": "测试-ACFAN", "keywords": ["ACFAN特战队", "ACFAN", "AIGC原创部", "AIGC"], "chat_id": -5375721803},
     {"name": "测试-运营一部", "keywords": ["运营一部", "运营1部"], "chat_id": -5479404347},
     {"name": "测试-运营二部", "keywords": ["运营二部", "运营2部"], "chat_id": -5145693025},
     {"name": "测试-渠道商务", "keywords": ["渠道部", "商务部", "渠道商务部"], "chat_id": -1004345123072},

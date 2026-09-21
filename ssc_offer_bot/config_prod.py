@@ -22,6 +22,9 @@ GROUP_REGULARIZATION_TRIGGER = int(os.environ.get(
     "GROUP_REGULARIZATION_TRIGGER", "-1004492520637"
 ))
 GROUP_ANNIVERSARY_TRIGGER = GROUP_REGULARIZATION_TRIGGER
+GROUP_REGULARIZATION_SYNC = int(os.environ.get(
+    "GROUP_REGULARIZATION_SYNC", "-1004468512291"
+))  # 人事信息同步-SSC3组
 
 # ========== 审批链角色（填 Telegram 用户名，不带 @） ==========
 LEADER_FIRST = "DaBai10010"        # 一级审批：白一舟，收到"好的"作为一级通过标志
@@ -29,7 +32,7 @@ LEADER_SECOND_TECH = "hk88mc996"   # 技术中心专属二级审批人
 LEADER_FINAL = "chuqianyiding"     # 终审人（所有部门最终都要走到这一步）
 
 ANNIVERSARY_GROUP_RULES = [
-    {"name": "恒睿公司-ACFAN特战队-全员群", "keywords": ["ACFAN特战队", "ACFAN"], "chat_id": -1003553653887},
+    {"name": "恒睿公司-ACFAN特战队-全员群", "keywords": ["ACFAN特战队", "ACFAN", "AIGC原创部", "AIGC"], "chat_id": -1003553653887},
     {"name": "恒睿公司-运营一部-全员群", "keywords": ["运营一部", "运营1部"], "chat_id": -1003663263859},
     {"name": "恒睿公司-运营二部-全员群", "keywords": ["运营二部", "运营2部"], "chat_id": -1003950803307},
     {"name": "恒睿-渠道/商务部-全员群", "keywords": ["渠道部", "商务部", "渠道商务部"], "chat_id": -1003872014182},

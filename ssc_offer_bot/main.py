@@ -50,7 +50,15 @@ from daily_reports import DailyReportSender
 from regularization import (
     RegularizationDriveRepository,
     build_regularization_messages,
+    department_for_name,
+    extract_section_for_names,
+    greeting_for_name,
+    match_department_group,
+    names_from_trigger,
     regularization_trigger_scope,
+    split_sections,
+    today_trigger_matches,
+    today_trigger_scope,
     trigger_keyword_matches,
 )
 from anniversary import AnniversaryDriveRepository, anniversary_destination
@@ -130,7 +138,7 @@ async def get_ssc_reviewer():
 
 async def queue_group_message(destination, text, *, candidate, expected_stage,
                               updates, id_field=None, kind="message", reply_to=None,
-                              file=None, approval_code=None):
+                              file=None, approval_code=None, delete_draft_after_send=False):
     """所有群消息统一先送收藏夹，由该类消息的审批码放行。"""
     approval_code = approval_code or config.OFFER_APPROVAL_CODE
     if destination not in config.ALLOWED_DESTINATION_IDS:
@@ -145,6 +153,7 @@ async def queue_group_message(destination, text, *, candidate, expected_stage,
             "candidate": candidate, "expected_stage": expected_stage,
             "updates": updates, "id_field": id_field, "kind": kind, "status": "pending",
             "review_chat_id": reviewer.id, "approval_code": str(approval_code),
+            "delete_draft_after_send": delete_draft_after_send,
         })
         state.update(candidate, stage=expected_stage)
         log.info(
@@ -227,6 +236,11 @@ async def on_ssc_send_approval(event):
             log.info("[SSC审批] 已发送至群=%s msg_id=%s", item["destination"], sent.id)
             # 主动覆盖程序发布的消息；同一消息的监听回调由持久化记录去重。
             await forward_onboarding_to_hrgs(sent, item["destination"])
+            if item.get("delete_draft_after_send"):
+                try:
+                    await client.delete_messages(reviewer.id, [item["draft_id"]])
+                except Exception:
+                    log.exception("[SSC审批] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
         except Exception:
             log.exception("[SSC审批] 发送或保存失败，草稿msg_id=%s；结果待核查，不自动重发", item["draft_id"])
 
@@ -347,6 +361,119 @@ async def on_regularization_trigger(event):
             await client.send_message(
                 reviewer.id,
                 "转正提醒处理失败，请查看机器人日志。错误：" + str(exc)[:300],
+                parse_mode=None,
+            )
+
+
+@client.on(events.NewMessage(chats=config.GROUP_REGULARIZATION_TRIGGER))
+async def on_regularization_today_trigger(event):
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = event.raw_text or ""
+    normalized = unicodedata.normalize("NFKC", text)
+    if (not config.ALLOW_MANUAL_TRIGGERS
+            and event.sender_id != config.REGULARIZATION_TRIGGER_BOT_ID):
+        return
+    if not today_trigger_matches(normalized, config.REGULARIZATION_TODAY_TRIGGER_KEYWORD):
+        return
+
+    trigger_scope = today_trigger_scope(
+        normalized, config.REGULARIZATION_TODAY_TRIGGER_KEYWORD
+    )
+    event_key = f"today:{event.chat_id}:{event.message.id}"
+    async with regularization_lock:
+        previous = regularization_events.get(event_key)
+        if previous and previous.get("status") in {"processing", "queued"}:
+            return
+        regularization_events.set(event_key, {"status": "processing"})
+        reviewer = await get_ssc_reviewer()
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date()
+            monthly_text, source_file = await asyncio.to_thread(
+                regularization_drive.load_month, today
+            )
+            sections = split_sections(monthly_text)
+            names = names_from_trigger(trigger_scope, sections.get("转正信息同步", ""))
+            if not names:
+                await client.send_message(
+                    reviewer.id,
+                    "今日转正处理失败：在当月转正信息中未匹配到提醒消息里的花名。",
+                    parse_mode=None,
+                )
+                regularization_events.set(event_key, {
+                    "status": "failed", "reason": "names_not_found",
+                    "source_file_id": source_file.get("id"),
+                })
+                return
+
+            drafts = []
+            for name in names:
+                greeting = greeting_for_name(sections.get("转正通知", ""), name)
+                if not greeting:
+                    raise LookupError(f"当月转正信息中未找到{name}的转正通知")
+                if len(greeting) > 1000:
+                    raise RuntimeError(f"{name}的转正通知超过海报说明长度")
+                department = department_for_name(sections.get("转正信息同步", ""), name)
+                destination = match_department_group(department, config.ANNIVERSARY_GROUP_RULES)
+                if not destination:
+                    raise LookupError(
+                        f"{name}：无法根据部门匹配全员群（部门-小组={department or '未填写'}）"
+                    )
+                poster = await asyncio.to_thread(regularization_drive.find_poster, today, name)
+                candidate_key = f"regularization_today:{event_key}:{name}"
+                draft = await queue_group_message(
+                    destination,
+                    greeting,
+                    file=poster,
+                    candidate=candidate_key,
+                    expected_stage="waiting_ssc_regularization_today",
+                    updates={"stage": "regularization_today_sent", "name": name},
+                    kind="message",
+                    approval_code=config.REGULARIZATION_TODAY_APPROVAL_CODE,
+                    delete_draft_after_send=True,
+                )
+                drafts.append({"name": name, "draft_id": draft.id, "destination": destination})
+
+            if config.GROUP_REGULARIZATION_SYNC:
+                sync_text = extract_section_for_names(
+                    "转正信息同步", sections.get("转正信息同步", ""), names
+                )
+                if sync_text:
+                    sync_draft = await queue_group_message(
+                        config.GROUP_REGULARIZATION_SYNC,
+                        sync_text,
+                        candidate=f"regularization_today_sync:{event_key}",
+                        expected_stage="waiting_ssc_regularization_today_sync",
+                        updates={"stage": "regularization_today_sync_sent", "names": names},
+                        kind="message",
+                        approval_code=config.REGULARIZATION_TODAY_SYNC_APPROVAL_CODE,
+                        delete_draft_after_send=True,
+                    )
+                    drafts.append({
+                        "name": "、".join(names), "draft_id": sync_draft.id,
+                        "destination": config.GROUP_REGULARIZATION_SYNC, "kind": "sync",
+                    })
+
+            regularization_events.set(event_key, {
+                "status": "queued", "drafts": drafts,
+                "source_file_id": source_file.get("id"),
+            })
+            log.info(
+                "[今日转正] %s 的海报和祝贺已发送收藏夹，等待SSC发送%s",
+                "、".join(item["name"] for item in drafts),
+                config.REGULARIZATION_TODAY_APPROVAL_CODE,
+            )
+        except Exception as exc:
+            regularization_events.set(event_key, {
+                "status": "failed", "reason": str(exc)[:500],
+            })
+            log.exception("[今日转正] msg_id=%s 处理失败", event.message.id)
+            await client.send_message(
+                reviewer.id,
+                "今日转正处理失败，未发送到全员群。错误：" + str(exc)[:300],
                 parse_mode=None,
             )
 
