@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """转正提醒的 Drive 查找、花名匹配与四类消息提取。"""
 
+import io
 import re
 
 from daily_reports import DRIVE_FILES_URL, _drive_session
@@ -14,11 +15,17 @@ _SECTION_RE = re.compile(
 )
 _BLOCK_RE = re.compile(r"(?m)^\s*(?:—{2,}|-{3,})\s*$")
 _NAME_RE = re.compile(r"花名\s*[:：]\s*([^\s,，;；]+)")
+_DEPARTMENT_RE = re.compile(r"部门-小组\s*[:：]\s*([^\n]+)")
 _REMINDER_FOOTER_RE = re.compile(r"(?s)\n*如需延期，.*\Z")
 _TRIGGER_SEPARATOR_RE = re.compile(r"[\s\-‐‑‒–—―－]+")
+_NORMALIZE_RE = re.compile(r"[\s/_\-—]+")
 _ORG_SECTION_RE_TEMPLATE = r"【\s*{organization}\s*】(?P<body>.*?)(?=\n\s*【|\Z)"
 _COUNTDOWN_BLOCK_RE_TEMPLATE = (
     r"转正倒数\s*{days}\s*天\s*[:：](?P<body>.*?)"
+    r"(?=\n\s*(?:转正倒数\s*\d+\s*天|今日转正)\s*[:：]|\Z)"
+)
+_TODAY_BLOCK_RE = (
+    r"今日转正\s*[:：](?P<body>.*?)"
     r"(?=\n\s*(?:转正倒数\s*\d+\s*天|今日转正)\s*[:：]|\Z)"
 )
 
@@ -59,6 +66,71 @@ def regularization_trigger_scope(text, keyword):
     compact_text = _TRIGGER_SEPARATOR_RE.sub("", text or "").casefold()
     compact_keyword = _TRIGGER_SEPARATOR_RE.sub("", keyword or "").casefold()
     return text if compact_keyword and compact_keyword in compact_text else ""
+
+
+def extract_today_trigger_scope(text, organization="恒睿"):
+    """返回指定公司分区内“今日转正”人员块；未命中返回空串。"""
+    normalized = text or ""
+    if "转正提醒" not in normalized:
+        return ""
+    org_pattern = _ORG_SECTION_RE_TEMPLATE.format(
+        organization=re.escape(organization)
+    )
+    org_match = re.search(org_pattern, normalized, flags=re.S)
+    if not org_match:
+        return ""
+    today_match = re.search(_TODAY_BLOCK_RE, org_match.group("body"), flags=re.S)
+    if not today_match:
+        return ""
+    body = today_match.group("body").strip()
+    return body if body else ""
+
+
+def today_trigger_matches(text, keyword):
+    compact_text = _TRIGGER_SEPARATOR_RE.sub("", text or "").casefold()
+    compact_keyword = _TRIGGER_SEPARATOR_RE.sub("", keyword or "").casefold()
+    if compact_keyword and compact_keyword in compact_text:
+        return True
+    return bool(extract_today_trigger_scope(text))
+
+
+def today_trigger_scope(text, keyword):
+    """供处理器提取花名：新版只返回恒睿今日转正块，旧版保留原消息。"""
+    scoped = extract_today_trigger_scope(text)
+    if scoped:
+        return scoped
+    compact_text = _TRIGGER_SEPARATOR_RE.sub("", text or "").casefold()
+    compact_keyword = _TRIGGER_SEPARATOR_RE.sub("", keyword or "").casefold()
+    return text if compact_keyword and compact_keyword in compact_text else ""
+
+
+def greeting_for_name(notice_section_text, name):
+    """从【转正通知】区块中取指定花名的祝贺正文，用作海报的图片说明。"""
+    blocks = split_blocks(notice_section_text)
+    matches = [block for block in blocks if _block_has_name("转正通知", block, name)]
+    return matches[-1].strip() if matches else ""
+
+
+def department_for_name(sync_section_text, name):
+    """从【转正信息同步】区块中取指定花名的“部门-小组”，用于匹配全员群。"""
+    blocks = split_blocks(sync_section_text)
+    matches = [block for block in blocks if _block_has_name("转正信息同步", block, name)]
+    if not matches:
+        return ""
+    field_match = _DEPARTMENT_RE.search(matches[-1])
+    return field_match.group(1).strip() if field_match else ""
+
+
+def match_department_group(department_text, group_rules):
+    """按部门文本匹配 group_rules（与入职周年共用同一路由表）中的目标群。"""
+    haystack = _NORMALIZE_RE.sub("", department_text or "").casefold()
+    if not haystack:
+        return None
+    for rule in group_rules:
+        if any(_NORMALIZE_RE.sub("", keyword).casefold() in haystack
+               for keyword in rule["keywords"]):
+            return int(rule["chat_id"])
+    return None
 
 
 def _escape_query(value):
@@ -182,8 +254,19 @@ class RegularizationDriveRepository:
             ) from exc
         return text.replace("\r\n", "\n").replace("\r", "\n")
 
-    def load_month(self, day):
-        session, auth_params = _drive_session()
+    @staticmethod
+    def _download_bytes(session, auth_params, drive_file):
+        response = session.get(
+            f"{DRIVE_FILES_URL}/{drive_file['id']}",
+            params={**auth_params, "alt": "media"},
+            timeout=120,
+        )
+        response.raise_for_status()
+        result = io.BytesIO(response.content)
+        result.name = drive_file.get("name") or "regularization-poster.png"
+        return result
+
+    def _resolve_month_files(self, session, auth_params, day):
         children = self._list_children(
             session, auth_params, self.output_folder_id
         )
@@ -197,8 +280,12 @@ class RegularizationDriveRepository:
         ]
         if not folders:
             raise FileNotFoundError(f"未找到 {day.year}年{day.month}月转正文件夹")
+        return self._list_children(session, auth_params, folders[0]["id"])
 
-        files = self._list_children(session, auth_params, folders[0]["id"])
+    def load_month(self, day):
+        session, auth_params = _drive_session()
+        files = self._resolve_month_files(session, auth_params, day)
+        folder_mime = "application/vnd.google-apps.folder"
         candidates = [
             item for item in files
             if item.get("mimeType") != folder_mime
@@ -208,3 +295,18 @@ class RegularizationDriveRepository:
         if not candidates:
             raise FileNotFoundError("当月转正文件夹中未找到转正信息 TXT")
         return self._download_text(session, auth_params, candidates[0]), candidates[0]
+
+    def find_poster(self, day, name):
+        session, auth_params = _drive_session()
+        files = self._resolve_month_files(session, auth_params, day)
+        folder_mime = "application/vnd.google-apps.folder"
+        posters = [
+            item for item in files
+            if item.get("mimeType") != folder_mime
+            and name in item.get("name", "")
+            and (item.get("mimeType", "").startswith("image/")
+                 or item.get("name", "").lower().endswith((".jpg", ".jpeg", ".png", ".webp")))
+        ]
+        if not posters:
+            raise FileNotFoundError(f"未找到{name}的转正海报")
+        return self._download_bytes(session, auth_params, posters[0])

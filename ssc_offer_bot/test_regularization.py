@@ -116,3 +116,44 @@ class RepositoryTests(TestCase):
             )
         self.assertEqual(text, SAMPLE)
         self.assertEqual(item["id"], "txt")
+
+    def test_find_poster_matches_by_name_in_month_folder(self):
+        session = Mock()
+        session.get.side_effect = [
+            FakeResponse({"files": [
+                {"id": "sep", "name": "20260901_9月转正",
+                 "mimeType": "application/vnd.google-apps.folder"},
+            ]}),
+            FakeResponse({"files": [
+                {"id": "txt", "name": "2026年9月多人转正信息_20260901.txt",
+                 "mimeType": "text/plain"},
+                {"id": "poster-other", "name": "三风_转正海报_20260901.png",
+                 "mimeType": "image/png"},
+                {"id": "poster-bill", "name": "比尔_转正海报_20260901.png",
+                 "mimeType": "image/png"},
+            ]}),
+            FakeResponse(text="PNGBYTES"),
+        ]
+        with patch("regularization._drive_session", return_value=(session, {})):
+            poster = RegularizationDriveRepository("output").find_poster(
+                date(2026, 9, 21), "比尔"
+            )
+        self.assertEqual(poster.read(), b"PNGBYTES")
+
+    def test_find_poster_raises_when_no_match(self):
+        session = Mock()
+        session.get.side_effect = [
+            FakeResponse({"files": [
+                {"id": "sep", "name": "20260901_9月转正",
+                 "mimeType": "application/vnd.google-apps.folder"},
+            ]}),
+            FakeResponse({"files": [
+                {"id": "txt", "name": "2026年9月多人转正信息_20260901.txt",
+                 "mimeType": "text/plain"},
+            ]}),
+        ]
+        with patch("regularization._drive_session", return_value=(session, {})):
+            with self.assertRaises(FileNotFoundError):
+                RegularizationDriveRepository("output").find_poster(
+                    date(2026, 9, 21), "比尔"
+                )
