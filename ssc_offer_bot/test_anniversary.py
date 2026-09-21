@@ -1,6 +1,7 @@
 from unittest import TestCase
 
 from anniversary import (
+    AnniversaryDriveRepository,
     anniversary_destination,
     extract_anniversary_greeting,
     names_from_anniversary_trigger,
@@ -124,3 +125,37 @@ class AnniversaryParserTests(TestCase):
         self.assertEqual(names, ["简言"])
         greeting = extract_anniversary_greeting(info_text, names[0])
         self.assertTrue(greeting.startswith("祝贺 简言 @jianyan567"))
+
+
+class FakeMisdetectedEncodingResponse:
+    """模拟 requests 把 text/plain 误判成 Latin-1：content是正确的UTF-8字节，
+    但 .encoding/.text 会按错误编码解码，用来验证下载函数不会依赖它们。"""
+
+    def __init__(self, text):
+        self._utf8_bytes = text.encode("utf-8")
+        self.encoding = "ISO-8859-1"
+
+    @property
+    def content(self):
+        return self._utf8_bytes
+
+    @property
+    def text(self):
+        return self._utf8_bytes.decode(self.encoding)
+
+    def raise_for_status(self):
+        return None
+
+
+class DownloadTextEncodingTests(TestCase):
+    def test_decodes_utf8_bytes_even_when_response_claims_latin1(self):
+        real_text = "【简言｜1周年】\n祝贺 简言 @jianyan567\n\n入职满 1 周年，感谢有你！！！\n"
+        response = FakeMisdetectedEncodingResponse(real_text)
+        session = type("Session", (), {"get": lambda self, *a, **k: response})()
+        drive_file = {"id": "f1", "mimeType": "text/plain"}
+        decoded = AnniversaryDriveRepository._download_text(session, {}, drive_file)
+        self.assertEqual(decoded, real_text)
+        self.assertIn("简言", decoded)
+        # 反面对照：直接读 .text（走 requests 自己猜的编码）会是乱码，
+        # 证明修复确实绕开了 response.text，不是碰巧一样。
+        self.assertNotIn("简言", response.text)
