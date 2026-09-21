@@ -299,6 +299,30 @@ class SscApprovalDeletesDraftTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.deleted, [(9, [400])])
         self.assertEqual(outbox.get('400')['status'], 'sent')
 
+    async def test_anniversary_draft_also_deleted_after_测试3_approval(self):
+        # 用户要求：入职周年海报和祝贺语审核通过、转发到全员群后，收藏夹里的这条草稿也要删掉。
+        outbox = MemoryStore()
+        outbox.set('500', {
+            'draft_id': 500, 'destination': -5412973830, 'reply_to': None,
+            'candidate': 'anniversary:-1:1:简言',
+            'expected_stage': 'waiting_ssc_anniversary',
+            'updates': {'stage': 'anniversary_sent', 'name': '简言'},
+            'id_field': None, 'kind': 'message', 'status': 'pending',
+            'review_chat_id': 9, 'approval_code': '测试3',
+            'delete_draft_after_send': True,
+        })
+        state = MemoryStore()
+        state.set('anniversary:-1:1:简言', {'stage': 'waiting_ssc_anniversary'})
+        env = self.build_approval_env(outbox, state)
+        env['config'].APPROVAL_CODES = frozenset({'测试3'})
+
+        event = NS(chat_id=9, sender_id=9, is_private=True, raw_text='测试3',
+                    message=NS(id=501, reply_to_msg_id=None))
+        await env['on_ssc_send_approval'](event)
+
+        self.assertEqual(self.deleted, [(9, [500])])
+        self.assertEqual(outbox.get('500')['status'], 'sent')
+
     async def test_does_not_delete_draft_when_flag_absent(self):
         # 代表未设置 delete_draft_after_send 的老流程（如 offer 群消息），默认不删草稿。
         outbox = MemoryStore()

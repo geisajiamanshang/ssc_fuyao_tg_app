@@ -530,6 +530,7 @@ async def on_anniversary_trigger(event):
                     updates={"stage": "anniversary_sent", "name": person["name"]},
                     kind="message",
                     approval_code=config.ANNIVERSARY_APPROVAL_CODE,
+                    delete_draft_after_send=True,
                 )
                 drafts.append({"name": person["name"], "draft_id": draft.id})
 
