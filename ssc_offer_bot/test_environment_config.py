@@ -31,6 +31,18 @@ class EnvironmentConfigTests(TestCase):
             {-5375721803, -5479404347, -5145693025, -1004345123072, -5412973830},
         )
 
+    def test_tech_center_real_department_names_route_to_tech_efficiency_group(self):
+        # 真实花名册里技术中心员工的部门写的是“研发部”（前端组/后端组/测试组），
+        # 不是“技术部”；之前规则里缺了这两个关键词，导致周年提醒匹配不到全员群。
+        from anniversary import anniversary_destination
+        trigger = "编制组织：技术中心\n部门：研发部"
+        for rules, expected_chat_id in (
+            (test.ANNIVERSARY_GROUP_RULES, -5412973830),
+            (prod.ANNIVERSARY_GROUP_RULES, -1003946619557),
+        ):
+            destination, _ = anniversary_destination(trigger, rules)
+            self.assertEqual(destination, expected_chat_id)
+
     def test_approval_codes_cannot_be_consumed_by_both_instances(self):
         self.assertTrue({"1", "2", "3"}.isdisjoint(test.APPROVAL_CODES))
         self.assertEqual(test.REGULARIZATION_APPROVAL_CODE, "测试2")
