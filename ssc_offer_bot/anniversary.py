@@ -19,6 +19,7 @@ _FIELD_RE = re.compile(r"(?m)^\s*([^\n:：]{1,20})\s*[:：]\s*([^\n]+?)\s*$")
 # 云昭机器人的分组提醒消息把编号和编制组织/部门写在花名后的括号里，
 # 例如“简言（NX0362｜运营中心/技术效能部）”，不是独立的“编制组织：/部门：”字段行。
 _COMPACT_ENTRY_RE = re.compile(r"[（(][^）(]*?[｜|]([^）)]+)[）)]")
+_COMPACT_NAME_RE = re.compile(r"([^\s（(【】｜|]{1,20})\s*[（(][^）(]*?[｜|][^）)]+[）)]")
 
 
 def _normalized(value):
@@ -30,7 +31,9 @@ def _escape_query(value):
 
 
 def names_from_anniversary_trigger(trigger_text, info_text):
-    """优先使用提醒里的“花名”，再用入职信息文件中的已知花名反查。"""
+    """优先使用提醒里的“花名”字段，再用入职信息文件中的已知花名反查；
+    两者都找不到时（比如信息文件还没来得及更新这个人），最后兼容云昭机器人
+    紧凑格式，直接从“花名（编号｜部门）”里取花名前缀。"""
     known = list(dict.fromkeys(
         _NAME_RE.findall(info_text or "") + _HEADING_NAME_RE.findall(info_text or "")
     ))
@@ -40,6 +43,8 @@ def names_from_anniversary_trigger(trigger_text, info_text):
     for name in known:
         if _normalized(name) in compact and name not in result:
             result.append(name)
+    if not result:
+        result = list(dict.fromkeys(_COMPACT_NAME_RE.findall(trigger_text or "")))
     return result
 
 

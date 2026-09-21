@@ -94,3 +94,33 @@ class AnniversaryParserTests(TestCase):
         fields = parse_anniversary_fields(trigger)
         self.assertEqual(fields["org_unit"], "恒睿公司")
         self.assertEqual(fields["department"], "运营一部")
+
+    def test_compact_name_extracted_when_info_file_has_no_known_names(self):
+        # 信息文件里完全没有可反查的花名（比如还没来得及生成/更新）时，
+        # 也要能直接从触发消息的紧凑格式里取出花名，而不是直接判定未匹配。
+        trigger = "简言（NX0362｜运营中心/技术效能部）入职日期：2026-09-15"
+        self.assertEqual(names_from_anniversary_trigger(trigger, ""), ["简言"])
+
+    def test_compact_name_recovers_full_pipeline_against_real_greeting_file(self):
+        # 用真实周年祝贺语.txt 的格式：反查花名表没命中这个人时（比如信息文件
+        # 还没来得及包含他），最终仍能从紧凑格式里取出花名，并且这个花名依然
+        # 能在祝贺语正文里通过子串匹配找到对应内容（extract_anniversary_greeting
+        # 自己也会退回子串匹配，不依赖 known 花名表）。
+        info_text = """【陈昊｜1周年】
+祝贺 陈昊 @chenhao985
+
+入职满 1 周年，感谢有你！！！
+
+————————————
+
+【简言｜1周年】
+祝贺 简言 @jianyan567
+
+入职满 1 周年，感谢有你！！！
+"""
+        trigger = "简言（NX0362｜运营中心/技术效能部）入职日期：2026-09-15"
+        # 故意传一份不包含“简言”的信息文件片段，模拟反查表没命中的情况。
+        names = names_from_anniversary_trigger(trigger, "【陈昊｜1周年】\n祝贺 陈昊 @chenhao985")
+        self.assertEqual(names, ["简言"])
+        greeting = extract_anniversary_greeting(info_text, names[0])
+        self.assertTrue(greeting.startswith("祝贺 简言 @jianyan567"))
