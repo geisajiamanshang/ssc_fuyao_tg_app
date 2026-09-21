@@ -67,3 +67,30 @@ class AnniversaryParserTests(TestCase):
         destination, fields = anniversary_destination("入职周年提醒-恒睿", RULES)
         self.assertIsNone(destination)
         self.assertEqual(parse_anniversary_fields("部门：ACFAN特战队")["department"], "ACFAN特战队")
+
+    def test_falls_back_to_compact_grouped_message_format(self):
+        # 云昭机器人的真实分组提醒消息没有独立的“编制组织：/部门：”字段行，
+        # 而是把编号和编制组织/部门写在花名后的括号里，用｜分隔。
+        trigger = (
+            "📋 入职周年提醒 · 2026-09-15\n\n"
+            "【恒睿】\n"
+            "入职1周年：\n"
+            "简言（NX0362｜运营中心/技术效能部）入职日期：2026-09-15\n"
+        )
+        fields = parse_anniversary_fields(trigger)
+        self.assertEqual(fields["org_unit"], "运营中心")
+        self.assertEqual(fields["department"], "技术效能部")
+        destination, _ = anniversary_destination(trigger, RULES)
+        self.assertEqual(destination, -1003)
+
+    def test_compact_format_without_org_prefix_still_routes(self):
+        trigger = "简言（NX0362｜ACFAN特战队）入职日期：2026-09-15"
+        destination, fields = anniversary_destination(trigger, RULES)
+        self.assertEqual(destination, -1001)
+
+    def test_field_lines_take_priority_over_compact_format(self):
+        # 独立字段行存在时优先使用，不去解析括号里的内容。
+        trigger = "编制组织：恒睿公司\n部门：运营一部\n简言（NX0362｜ACFAN特战队）"
+        fields = parse_anniversary_fields(trigger)
+        self.assertEqual(fields["org_unit"], "恒睿公司")
+        self.assertEqual(fields["department"], "运营一部")
