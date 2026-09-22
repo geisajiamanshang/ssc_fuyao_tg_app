@@ -4,10 +4,12 @@
 
 | 环境 | Git 分支 | VPS 目录 | systemd 服务 | 审批码 |
 |---|---|---|---|---|
-| 测试 | `test` | `/root/ssc_fuyao_tg_app_test` | `ssc-offer-bot-test` | `测试1` / `测试2` / `测试3` |
-| 生产 | `main` | `/root/ssc_fuyao_tg_app_prod` | `ssc-offer-bot-prod` | `1` / `2` / `3` |
+| 测试 | `test` | `/root/ssc_fuyao_tg_app_test` | `ssc-offer-bot-test` | `测试1` / `测试2` / `测试3` / `测试4` / `测试4.1` / `测试11` |
+| 生产 | `main` | `/root/ssc_fuyao_tg_app_prod` | `ssc-offer-bot-prod` | `1` / `2` / `3` / `4` / `4.1` / `11` |
 
 两个实例必须使用不同的 `.env`、Telegram session、状态文件和日志。不要在同一个工作目录切换分支运行两个实例。
+
+审批码 `测试11`/`11` 用于"入职确认已发布到联合管理群后，再转发到预入职登记群"这一步（`GROUP_PRE_ONBOARDING`）。该目标群ID需要用 `list_chats.py` 取得后分别填入 `.env.test` / `.env.prod` 的 `GROUP_PRE_ONBOARDING`；未配置前该功能自动跳过，不影响其余流程。
 
 ## 修改和发布流程
 
