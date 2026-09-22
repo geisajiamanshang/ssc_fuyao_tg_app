@@ -17,12 +17,19 @@ import unicodedata
 
 
 def mentions_ssc(message):
-    """两套环境均识别指定SSC，不依赖当前账号的 mentioned 标记。"""
+    """两套环境均识别指定SSC，不依赖当前账号的 mentioned 标记。
+
+    @oiyr90557 是早期误用的旧标签（当时把 my.telegram.org 的 API 应用短名称
+    误当成了机器人的 Telegram 用户名），机器人账号真正的用户名是 @ffuuyao。
+    部分 BP 的 Offer 消息模板至今仍沿用旧标签，未同步更新会导致消息被
+    on_hrbp_offer 静默忽略、流程卡在第一步。这里同时接受新旧两个标签，
+    保证旧模板的 Offer 消息也能被正常处理；同时应推动模板尽快改回 @ffuuyao。
+    """
     if any(getattr(entity, "user_id", None) == 8853414240
            for entity in (getattr(message, "entities", None) or [])):
         return True
     return bool(re.search(
-        r"(?<![A-Za-z0-9_@])@ffuuyao(?![A-Za-z0-9_])",
+        r"(?<![A-Za-z0-9_@])@(?:ffuuyao|oiyr90557)(?![A-Za-z0-9_])",
         getattr(message, "raw_text", "") or "", re.I,
     ))
 

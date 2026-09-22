@@ -17,6 +17,14 @@ class MentionTests(TestCase):
         for text in ['@ffuuyao_other', '@other', '小A 小B 小C']:
             self.assertFalse(mentions_ssc(NS(raw_text=text)))
 
+    def test_legacy_oiyr90557_tag_still_accepted(self):
+        # 旧版 Offer 模板仍在用 @oiyr90557（早期把 API 应用短名称误当成机器人
+        # 用户名留下的标签），未同步更新的 BP 模板不应导致 Offer 被静默丢弃。
+        for text in ['@oiyr90557 麻烦跟进offer', '@OIYR90557', '请@oiyr90557审批']:
+            self.assertTrue(mentions_ssc(NS(raw_text=text)))
+        for text in ['@oiyr90557_other', '@oiyr905570']:
+            self.assertFalse(mentions_ssc(NS(raw_text=text)))
+
     def test_id_mention_and_flag(self):
         self.assertFalse(mentions_ssc(NS(mentioned=True)))
         self.assertTrue(mentions_ssc(NS(entities=[NS(user_id=8853414240)])))
@@ -76,3 +84,46 @@ class IntakeTests(IsolatedAsyncioTestCase):
 
         await asyncio.gather(*(env['on_hrbp_offer'](event) for event in events))
         self.assertEqual(len(saved), 3)
+
+    async def test_legacy_template_with_oiyr90557_tag_still_reaches_ssc(self):
+        # 复现生产事故：BP 用了仍标注旧版 @oiyr90557 的【Offer 申请】模板，
+        # 消息在修复前会被 mentions_ssc 静默拒绝，Offer 永远进不到下一步。
+        source = ast.parse(Path(__file__).with_name('main.py').read_text())
+        functions = [n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+                     and n.name in {'queue_group_message', 'on_hrbp_offer'}]
+        for node in functions:
+            node.decorator_list = []
+        saved = []
+
+        async def send_message(destination, text, **kwargs):
+            saved.append((destination, text))
+            return NS(id=200 + len(saved))
+
+        me = NS(id=9, username='ffuuyao')
+        state, outbox = MemoryStore(), MemoryStore()
+        env = dict(globals(), client=NS(get_me=AsyncMock(return_value=me),
+                                       send_message=send_message),
+                   state=state, outbox=outbox, ssc_send_lock=asyncio.Lock(),
+                   get_ssc_reviewer=AsyncMock(return_value=me),
+                   log=logging.getLogger('test'),
+                   build_offer_confirm_message=lambda org, body: org + '\n' + body,
+                   config=NS(GROUP_LEADERSHIP=-1, ALLOWED_DESTINATION_IDS={-1},
+                             OFFER_APPROVAL_CODE='测试1', ENVIRONMENT='test',
+                             EXCLUDED_CHAT_IDS=frozenset()))
+        exec(compile(ast.Module(body=functions, type_ignores=[]), 'main.py', 'exec'), env)
+        raw_text = (
+            '【Offer 申请】\n'
+            '候选人编码：LYSNZ000060\n'
+            '候选人姓名：Nancy\n'
+            '性别：女\n'
+            '入职编制组织：运营中心\n'
+            '职位：运营专员\n'
+            '转正薪资：15K\n'
+            '试用薪资：12K\n'
+            '@oiyr90557 麻烦跟进offer'
+        )
+        event = NS(message=NS(id=1, mentioned=False, media=None, raw_text=raw_text),
+                   chat_id=-2, sender_id=8, get_sender=AsyncMock(return_value=NS(username='bp')))
+        await env['on_hrbp_offer'](event)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual({r['candidate'] for r in outbox.data.values()}, {'Nancy'})
