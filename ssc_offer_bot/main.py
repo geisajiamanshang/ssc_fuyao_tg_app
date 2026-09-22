@@ -19,11 +19,15 @@ SSC Offer 审批流转自动化 主程序。
           -> 合并已有信息 + 私聊补充信息，拼出完整【入职信息确认】
           -> 回复到联合管理工作群里对应的【offer信息确认】消息，@对应部门领导
 
+  场景四：联合管理工作群的入职信息确认发布成功后
+          -> 再次经收藏夹审批（测试11/11）
+          -> 放行后原样转发到预入职登记群
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3”，生产审批使用“1/2/3”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11”，生产审批使用“1/2/3/11”。
 """
 
 import asyncio
@@ -163,6 +167,29 @@ async def queue_group_message(destination, text, *, candidate, expected_stage,
         return draft
 
 
+async def queue_pre_onboarding_registration(candidate, text):
+    """入职确认已发布到联合管理群后，再次经收藏夹审批转发到预入职登记群。
+
+    复用 queue_group_message 的审批码放行机制，但审批码是新的
+    PRE_ONBOARDING_APPROVAL_CODE（测试11/11），与入职确认本身的审批码
+    （OFFER_APPROVAL_CODE）分开，需要SSC再次在收藏夹确认才会发送。
+    expected_stage 固定用"done"：入职确认发送成功后候选人状态已经是
+    done，这里不改变候选人主流程的阶段，只是在done之后再挂一次转发。
+    """
+    if not config.PRE_ONBOARDING_FORWARD_ENABLED:
+        return
+    try:
+        await queue_group_message(
+            config.GROUP_PRE_ONBOARDING, text,
+            candidate=candidate, expected_stage="done", updates={"stage": "done"},
+            kind="pre_onboarding", approval_code=config.PRE_ONBOARDING_APPROVAL_CODE,
+        )
+        log.info("[预入职登记] %s 已提交收藏夹，等待SSC发送%s放行到预入职登记群",
+                 candidate, config.PRE_ONBOARDING_APPROVAL_CODE)
+    except Exception:
+        log.exception("[预入职登记] %s 入队失败", candidate)
+
+
 @client.on(events.NewMessage())
 async def on_ssc_send_approval(event):
     if event.chat_id in config.EXCLUDED_CHAT_IDS:
@@ -236,6 +263,10 @@ async def on_ssc_send_approval(event):
             log.info("[SSC审批] 已发送至群=%s msg_id=%s", item["destination"], sent.id)
             # 主动覆盖程序发布的消息；同一消息的监听回调由持久化记录去重。
             await forward_onboarding_to_hrgs(sent, item["destination"])
+            if item["kind"] == "onboarding":
+                # 另起任务：此时仍持有ssc_send_lock，queue_group_message需要
+                # 重新获取同一把锁，必须等当前 async with 退出后才能执行。
+                asyncio.create_task(queue_pre_onboarding_registration(item["candidate"], text))
             if item.get("delete_draft_after_send"):
                 try:
                     await client.delete_messages(reviewer.id, [item["draft_id"]])

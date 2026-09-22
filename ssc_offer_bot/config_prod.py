@@ -25,6 +25,10 @@ GROUP_ANNIVERSARY_TRIGGER = GROUP_REGULARIZATION_TRIGGER
 GROUP_REGULARIZATION_SYNC = int(os.environ.get(
     "GROUP_REGULARIZATION_SYNC", "-1004468512291"
 ))  # 人事信息同步-SSC3组
+# 预入职登记群：群ID待补充，先用 list_chats.py 跑一遍拿到真实ID，
+# 再通过环境变量 GROUP_PRE_ONBOARDING 或直接替换默认值 "0" 填入。
+# 留空（0）时该功能自动跳过，不影响其余流程，也不会误发到未确认的群。
+GROUP_PRE_ONBOARDING = int(os.environ.get("GROUP_PRE_ONBOARDING", "0")) or None
 
 # ========== 审批链角色（填 Telegram 用户名，不带 @） ==========
 LEADER_FIRST = "DaBai10010"        # 一级审批：白一舟，收到"好的"作为一级通过标志
