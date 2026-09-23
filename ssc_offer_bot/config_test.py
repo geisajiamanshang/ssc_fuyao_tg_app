@@ -26,6 +26,12 @@ GROUP_TRAINING = (
     int(os.environ["GROUP_TRAINING"])
     if os.environ.get("GROUP_TRAINING") else None
 )
+# SSC3组内部工作沟通群：群ID待补充，获取方式同上；留空时功能只在
+# GROUP_REGULARIZATION_TRIGGER（测试群）上生效。
+GROUP_SSC3_INTERNAL_CHAT = (
+    int(os.environ["GROUP_SSC3_INTERNAL_CHAT"])
+    if os.environ.get("GROUP_SSC3_INTERNAL_CHAT") else None
+)
 
 LEADER_FIRST = "haok001"
 LEADER_SECOND_TECH = "haok001"
@@ -58,4 +64,5 @@ DAILY_REPORT_STATE_PATH = DB_PATH + ".daily_reports.json"
 REGULARIZATION_STATE_PATH = DB_PATH + ".regularization.json"
 ANNIVERSARY_STATE_PATH = DB_PATH + ".anniversary.json"
 ONBOARDING_TRAINING_STATE_PATH = DB_PATH + ".onboarding_training.json"
+ALL_STAFF_NOTICE_STATE_PATH = DB_PATH + ".all_staff_notice.json"
 LOG_PATH = "bot.test.log"

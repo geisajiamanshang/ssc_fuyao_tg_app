@@ -36,12 +36,19 @@ SSC Offer 审批流转自动化 主程序。
           -> 分别放行到联合管理群 / 人事数据同步-SSC3组 / 按部门匹配的全员群，
              每条转发成功后自动删除收藏夹里对应的草稿
 
+  场景七：SSC3组内部工作沟通群 / 转正提醒来源群里出现"全员群"关键词
+          -> 取该消息之前最近一条图文通知，转发到收藏夹
+          -> SSC每发送一次审批码（测试7/7），只转发到剩余全员群里的下一个，
+             需要连续发送5次才能覆盖全部5个全员群；发送时取的是当前草稿
+             的最新内容，SSC可以在两次发送之间修改收藏夹草稿
+          -> 第5个群发送成功后自动删除收藏夹里的这条草稿
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2”，
-     生产审批使用“1/2/3/11/21/6/6.1/6.2”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7”，
+     生产审批使用“1/2/3/11/21/6/6.1/6.2/7”。
 """
 
 import asyncio
@@ -119,6 +126,8 @@ onboarding_training_lock = asyncio.Lock()
 onboarding_training_drive = OnboardingTrainingDriveRepository(
     config.ONBOARDING_TRAINING_OUTPUT_FOLDER_ID
 )
+all_staff_notice_events = StateStore(config.ALL_STAFF_NOTICE_STATE_PATH)
+all_staff_notice_lock = asyncio.Lock()
 
 
 async def forward_onboarding_to_hrgs(message, chat_id):
@@ -214,6 +223,40 @@ async def queue_pre_onboarding_registration(candidate, text):
         log.exception("[预入职登记] %s 入队失败", candidate)
 
 
+async def queue_all_staff_broadcast(candidate, text, file=None):
+    """一条图文通知先进SSC收藏夹；SSC每发送一次审批码7，只转发到剩余全员群
+    里的下一个，全部5个群都发完之前草稿保持待审批状态，可以重复发送同一个
+    审批码；直到第5个群发送成功才删除收藏夹里的这条草稿。这样SSC可以每发
+    一次核对一次效果，而不是一次性无法撤回地广播到全部5个群。
+    """
+    destinations = [rule["chat_id"] for rule in config.ANNIVERSARY_GROUP_RULES]
+    for destination in destinations:
+        if destination not in config.ALLOWED_DESTINATION_IDS:
+            raise RuntimeError(
+                f"[{config.ENVIRONMENT}] 全员群 {destination} 不在当前环境白名单，已阻止发送"
+            )
+    async with ssc_send_lock:
+        reviewer = await get_ssc_reviewer()
+        draft = await client.send_message(reviewer.id, text, file=file, parse_mode=None)
+        outbox.set(str(draft.id), {
+            "draft_id": draft.id, "destinations": destinations,
+            "remaining_destinations": list(destinations), "sent_destinations": [],
+            "candidate": candidate, "expected_stage": "waiting_ssc_all_staff_broadcast",
+            "updates": {"stage": "all_staff_broadcast_sent"}, "id_field": None,
+            "kind": "all_staff_broadcast", "status": "pending",
+            "review_chat_id": reviewer.id, "approval_code": str(config.ALL_STAFF_NOTICE_APPROVAL_CODE),
+            "delete_draft_after_send": True,
+        })
+        state.update(candidate, stage="waiting_ssc_all_staff_broadcast")
+        log.info(
+            "[全员群转发] 草稿msg_id=%s，等待SSC每发送一次%s转发到下一个全员群"
+            "（共%s个，需连续发送%s次才能覆盖全部）",
+            draft.id, config.ALL_STAFF_NOTICE_APPROVAL_CODE,
+            len(destinations), len(destinations),
+        )
+        return draft
+
+
 @client.on(events.NewMessage())
 async def on_ssc_send_approval(event):
     if event.chat_id in config.EXCLUDED_CHAT_IDS:
@@ -273,29 +316,61 @@ async def on_ssc_send_approval(event):
         # 先持久化发送中状态；发送结果不确定时禁止重复1盲目重发。
         outbox.update(key, status="sending", approval_msg_id=event.message.id)
         try:
-            sent = await client.send_message(item["destination"], text,
-                                             file=media, reply_to=item["reply_to"], parse_mode=None)
-            if item["id_field"]:
-                updates[item["id_field"]] = sent.id
-            if item["kind"] == "offer":
-                updates.update(offer_sent_at=sent.date.isoformat(),
-                               offer_chat_id=item["destination"], approvals={})
-            state.update(item["candidate"], **updates)
-            outbox.update(key, status="sent", sent_msg_id=sent.id)
-            if updates.get("stage") == "waiting_recruiter_dm":
-                asyncio.create_task(replay_pending_recruiter_dm(item["candidate"]))
-            log.info("[SSC审批] 已发送至群=%s msg_id=%s", item["destination"], sent.id)
-            # 主动覆盖程序发布的消息；同一消息的监听回调由持久化记录去重。
-            await forward_onboarding_to_hrgs(sent, item["destination"])
-            if item["kind"] == "onboarding":
-                # 另起任务：此时仍持有ssc_send_lock，queue_group_message需要
-                # 重新获取同一把锁，必须等当前 async with 退出后才能执行。
-                asyncio.create_task(queue_pre_onboarding_registration(item["candidate"], text))
-            if item.get("delete_draft_after_send"):
-                try:
-                    await client.delete_messages(reviewer.id, [item["draft_id"]])
-                except Exception:
-                    log.exception("[SSC审批] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
+            if item["kind"] == "all_staff_broadcast":
+                remaining = list(item.get("remaining_destinations") or item["destinations"])
+                sent_so_far = list(item.get("sent_destinations") or [])
+                destination = remaining.pop(0)
+                sent = await client.send_message(destination, text,
+                                                 file=media, parse_mode=None)
+                sent_so_far.append(destination)
+                if remaining:
+                    # 还有全员群没发完：保持pending，让SSC能对同一草稿再次发送
+                    # 同一个审批码，转发到下一个群；不提前更新候选人状态机。
+                    outbox.update(key, status="pending",
+                                 remaining_destinations=remaining,
+                                 sent_destinations=sent_so_far)
+                    log.info(
+                        "[SSC审批] 已广播至全员群=%s msg_id=%s；还剩%s个群，"
+                        "SSC可继续发送%s",
+                        destination, sent.id, len(remaining), item["approval_code"],
+                    )
+                else:
+                    state.update(item["candidate"], **updates)
+                    outbox.update(key, status="sent",
+                                 remaining_destinations=[], sent_destinations=sent_so_far)
+                    log.info(
+                        "[SSC审批] 已广播完全部全员群，最后一个=%s msg_id=%s",
+                        destination, sent.id,
+                    )
+                    if item.get("delete_draft_after_send"):
+                        try:
+                            await client.delete_messages(reviewer.id, [item["draft_id"]])
+                        except Exception:
+                            log.exception("[SSC审批] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
+            else:
+                sent = await client.send_message(item["destination"], text,
+                                                 file=media, reply_to=item["reply_to"], parse_mode=None)
+                if item["id_field"]:
+                    updates[item["id_field"]] = sent.id
+                if item["kind"] == "offer":
+                    updates.update(offer_sent_at=sent.date.isoformat(),
+                                   offer_chat_id=item["destination"], approvals={})
+                state.update(item["candidate"], **updates)
+                outbox.update(key, status="sent", sent_msg_id=sent.id)
+                if updates.get("stage") == "waiting_recruiter_dm":
+                    asyncio.create_task(replay_pending_recruiter_dm(item["candidate"]))
+                log.info("[SSC审批] 已发送至群=%s msg_id=%s", item["destination"], sent.id)
+                # 主动覆盖程序发布的消息；同一消息的监听回调由持久化记录去重。
+                await forward_onboarding_to_hrgs(sent, item["destination"])
+                if item["kind"] == "onboarding":
+                    # 另起任务：此时仍持有ssc_send_lock，queue_group_message需要
+                    # 重新获取同一把锁，必须等当前 async with 退出后才能执行。
+                    asyncio.create_task(queue_pre_onboarding_registration(item["candidate"], text))
+                if item.get("delete_draft_after_send"):
+                    try:
+                        await client.delete_messages(reviewer.id, [item["draft_id"]])
+                    except Exception:
+                        log.exception("[SSC审批] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
         except Exception:
             log.exception("[SSC审批] 发送或保存失败，草稿msg_id=%s；结果待核查，不自动重发", item["draft_id"])
 
@@ -768,6 +843,66 @@ async def on_onboarding_training_passed(event):
             await client.send_message(
                 reviewer.id,
                 "新人培训入职信息处理失败，请查看机器人日志。错误：" + str(exc)[:300],
+                parse_mode=None,
+            )
+
+
+@client.on(events.NewMessage())
+async def on_all_staff_notice_trigger(event):
+    if not config.ALL_STAFF_NOTICE_ENABLED:
+        return
+    if (event.chat_id not in config.ALL_STAFF_NOTICE_TRIGGER_CHAT_IDS
+            or event.chat_id in config.EXCLUDED_CHAT_IDS):
+        return
+    text = event.raw_text or ""
+    if config.ALL_STAFF_NOTICE_TRIGGER_KEYWORD not in text:
+        return
+
+    log.info(
+        "[全员群转发] 已捕捉触发消息：environment=%s chat_id=%s msg_id=%s",
+        config.ENVIRONMENT, event.chat_id, event.message.id,
+    )
+
+    event_key = f"{event.chat_id}:{event.message.id}"
+    async with all_staff_notice_lock:
+        previous = all_staff_notice_events.get(event_key)
+        if previous and previous.get("status") in {"processing", "queued"}:
+            return
+        all_staff_notice_events.set(event_key, {"status": "processing"})
+        reviewer = await get_ssc_reviewer()
+        try:
+            source_message = None
+            async for candidate_message in client.iter_messages(
+                event.chat_id, limit=20, max_id=event.message.id
+            ):
+                if candidate_message.id == event.message.id:
+                    continue
+                if candidate_message.media and (candidate_message.raw_text or "").strip():
+                    source_message = candidate_message
+                    break
+            if source_message is None:
+                raise RuntimeError("未在最近消息中找到需要转发到全员群的图文通知")
+
+            candidate_key = f"all_staff_notice:{event_key}"
+            draft = await queue_all_staff_broadcast(
+                candidate_key, source_message.raw_text, file=source_message.media
+            )
+            all_staff_notice_events.set(event_key, {
+                "status": "queued", "draft_id": draft.id,
+                "source_message_id": source_message.id,
+            })
+            log.info(
+                "[全员群转发] 已找到源消息msg_id=%s，草稿msg_id=%s，等待SSC发送%s",
+                source_message.id, draft.id, config.ALL_STAFF_NOTICE_APPROVAL_CODE,
+            )
+        except Exception as exc:
+            all_staff_notice_events.set(event_key, {
+                "status": "failed", "reason": str(exc)[:500],
+            })
+            log.exception("[全员群转发] msg_id=%s 处理失败", event.message.id)
+            await client.send_message(
+                reviewer.id,
+                "全员群通知转发失败，请查看机器人日志。错误：" + str(exc)[:300],
                 parse_mode=None,
             )
 
