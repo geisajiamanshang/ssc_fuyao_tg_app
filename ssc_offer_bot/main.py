@@ -23,11 +23,16 @@ SSC Offer 审批流转自动化 主程序。
           -> 再次经收藏夹审批（测试11/11）
           -> 放行后原样转发到预入职登记群
 
+  场景五：转正提醒-恒睿-转正倒数4天 触发后
+          -> 转正申请单独经收藏夹审批（测试21/21，与预转正提醒的审批码2并存）
+          -> 放行后转发到联合管理工作群；SSC可在批准前修改收藏夹里的草稿，
+             放行时发送的是修改后的最新内容
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11”，生产审批使用“1/2/3/11”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21”，生产审批使用“1/2/3/11/21”。
 """
 
 import asyncio
@@ -345,9 +350,10 @@ async def on_regularization_trigger(event):
                 })
                 return
 
-            # 参考信息先发；预转正提醒最后入审批队列，确保它是收藏夹中最近的草稿。
+            # 转正通知/转正信息同步是纯参考资料，直接发收藏夹；转正申请、预转正提醒
+            # 分别走各自审批码，最后入审批队列，确保它们是收藏夹中最近的草稿。
             missing = []
-            for section_name in ("转正通知", "转正信息同步", "转正申请"):
+            for section_name in ("转正通知", "转正信息同步"):
                 section_text = messages.get(section_name, "")
                 if section_text:
                     await _send_saved_text(reviewer.id, section_text)
@@ -360,6 +366,12 @@ async def on_regularization_trigger(event):
                     parse_mode=None,
                 )
 
+            application = messages.get("转正申请", "")
+            if not application:
+                raise RuntimeError("当月转正信息中未找到对应转正申请")
+            if len(application) > 4096:
+                raise RuntimeError("转正申请超过 Telegram 单条消息长度，无法进入单条审批")
+
             reminder = messages.get("预转正提醒", "")
             if not reminder:
                 raise RuntimeError("当月转正信息中未找到对应预转正提醒")
@@ -367,6 +379,16 @@ async def on_regularization_trigger(event):
                 raise RuntimeError("预转正提醒超过 Telegram 单条消息长度，无法进入单条审批")
 
             candidate_key = f"regularization:{event_key}"
+            application_key = f"regularization_application:{event_key}"
+            application_draft = await queue_group_message(
+                config.GROUP_LEADERSHIP,
+                application,
+                candidate=application_key,
+                expected_stage="waiting_ssc_regularization_application",
+                updates={"stage": "regularization_application_sent", "names": names},
+                kind="message",
+                approval_code=config.REGULARIZATION_APPLICATION_APPROVAL_CODE,
+            )
             draft = await queue_group_message(
                 config.GROUP_LEADERSHIP,
                 reminder,
@@ -378,8 +400,14 @@ async def on_regularization_trigger(event):
             )
             regularization_events.set(event_key, {
                 "status": "queued", "names": names, "draft_id": draft.id,
+                "application_draft_id": application_draft.id,
                 "source_file_id": source_file.get("id"),
             })
+            log.info(
+                "[转正提醒] %s 的转正申请已发送收藏夹；草稿msg_id=%s，等待SSC发送%s",
+                "、".join(names), application_draft.id,
+                config.REGULARIZATION_APPLICATION_APPROVAL_CODE,
+            )
             log.info(
                 "[转正提醒] %s 的资料已发送收藏夹；草稿msg_id=%s，等待SSC发送%s",
                 "、".join(names), draft.id, config.REGULARIZATION_APPROVAL_CODE,
