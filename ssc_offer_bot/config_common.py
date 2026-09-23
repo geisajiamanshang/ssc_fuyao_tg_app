@@ -72,6 +72,13 @@ ANNIVERSARY_DRIVE_ROOT_ID = os.environ.get(
 )
 ANNIVERSARY_DRIVE_PATH = ("海报助手", "输出", "当月入职周年海报")
 
+# 新人培训群里 @YYZXpeixun_bot 发的"新人培训考试通过"消息触发；
+# 入职助手/输出 文件夹下每个新人一个独立TXT，按TG用户名匹配文件内容。
+ONBOARDING_TRAINING_TRIGGER_KEYWORD = "新人培训考试通过"
+ONBOARDING_TRAINING_OUTPUT_FOLDER_ID = os.environ.get(
+    "ONBOARDING_TRAINING_OUTPUT_FOLDER_ID", "1gAxHM2zalT81_nTOSA5iGHwQSpR_--ia"
+)
+
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({
     -1003559652510,  # HRBP沟通群

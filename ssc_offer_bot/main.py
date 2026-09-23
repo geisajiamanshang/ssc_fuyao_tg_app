@@ -28,11 +28,20 @@ SSC Offer 审批流转自动化 主程序。
           -> 放行后转发到联合管理工作群；SSC可在批准前修改收藏夹里的草稿，
              放行时发送的是修改后的最新内容
 
+  场景六：新人培训群里 @YYZXpeixun_bot 发的"新人培训考试通过"消息，@ffuuyao
+          -> 按消息里@的新人TG用户名，到Drive云端 入职助手/输出 文件夹查找
+             该新人的入职信息，按【段落名】分区分条发到收藏夹
+          -> "新人入职通知""入职信息同步""欢迎"三个分区各自经独立审批码
+             （测试6/6、测试6.1/6.1、测试6.2/6.2）放行，其余分区仅作参考资料
+          -> 分别放行到联合管理群 / 人事数据同步-SSC3组 / 按部门匹配的全员群，
+             每条转发成功后自动删除收藏夹里对应的草稿
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21”，生产审批使用“1/2/3/11/21”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2”，
+     生产审批使用“1/2/3/11/21/6/6.1/6.2”。
 """
 
 import asyncio
@@ -71,6 +80,11 @@ from regularization import (
     trigger_keyword_matches,
 )
 from anniversary import AnniversaryDriveRepository, anniversary_destination
+from onboarding_training import (
+    GATED_SECTION_NAMES,
+    OnboardingTrainingDriveRepository,
+    split_named_sections,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,6 +113,11 @@ anniversary_events = StateStore(config.ANNIVERSARY_STATE_PATH)
 anniversary_lock = asyncio.Lock()
 anniversary_drive = AnniversaryDriveRepository(
     config.ANNIVERSARY_DRIVE_ROOT_ID, config.ANNIVERSARY_DRIVE_PATH
+)
+onboarding_training_events = StateStore(config.ONBOARDING_TRAINING_STATE_PATH)
+onboarding_training_lock = asyncio.Lock()
+onboarding_training_drive = OnboardingTrainingDriveRepository(
+    config.ONBOARDING_TRAINING_OUTPUT_FOLDER_ID
 )
 
 
@@ -610,6 +629,145 @@ async def on_anniversary_trigger(event):
             await client.send_message(
                 reviewer.id,
                 "入职周年提醒处理失败，未发送到全员群。错误：" + str(exc)[:300],
+                parse_mode=None,
+            )
+
+
+def _training_target_username(text):
+    """训练机器人消息里除了 @ffuuyao 外的第一个@用户名即新人本人。"""
+    for match in re.finditer(r"@([A-Za-z][A-Za-z0-9_]{3,})", text or ""):
+        username = match.group(1)
+        if username.casefold() not in {"ffuuyao", "oiyr90557"}:
+            return username
+    return ""
+
+
+@client.on(events.NewMessage())
+async def on_onboarding_training_passed(event):
+    if not config.ONBOARDING_TRAINING_ENABLED:
+        return
+    if event.chat_id != config.GROUP_TRAINING or event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = event.raw_text or ""
+    if config.ONBOARDING_TRAINING_TRIGGER_KEYWORD not in text:
+        return
+    if not mentions_ssc(event.message):
+        return
+    username = _training_target_username(text)
+    if not username:
+        log.info(
+            "[新人培训] 触发消息未找到新人TG用户名：chat_id=%s msg_id=%s",
+            event.chat_id, event.message.id,
+        )
+        return
+
+    log.info(
+        "[新人培训] 已捕捉触发消息：environment=%s chat_id=%s msg_id=%s username=@%s",
+        config.ENVIRONMENT, event.chat_id, event.message.id, username,
+    )
+
+    event_key = f"{event.chat_id}:{event.message.id}"
+    async with onboarding_training_lock:
+        previous = onboarding_training_events.get(event_key)
+        if previous and previous.get("status") in {"processing", "queued"}:
+            return
+        onboarding_training_events.set(event_key, {"status": "processing"})
+        reviewer = await get_ssc_reviewer()
+        try:
+            full_text, source_file = await asyncio.to_thread(
+                onboarding_training_drive.find_by_username, username
+            )
+            sections = split_named_sections(full_text)
+            if not sections:
+                raise RuntimeError("入职信息文件未按【段落名】格式分区，无法处理")
+
+            gated_by_name = {
+                name: body for name, body in sections
+                if name in GATED_SECTION_NAMES and body
+            }
+            missing = [name for name in GATED_SECTION_NAMES if name not in gated_by_name]
+
+            # 三个固定分区以外的内容是纯参考资料，原样分条发到收藏夹，不设审批码。
+            for name, body in sections:
+                if name not in GATED_SECTION_NAMES and body:
+                    await _send_saved_text(reviewer.id, f"【{name}】\n\n{body}")
+
+            draft_ids = {}
+
+            if "新人入职通知" in gated_by_name:
+                notice_draft = await queue_group_message(
+                    config.GROUP_LEADERSHIP,
+                    gated_by_name["新人入职通知"],
+                    candidate=f"onboarding_training_notice:{username}",
+                    expected_stage="waiting_ssc_onboarding_training_notice",
+                    updates={"stage": "onboarding_training_notice_sent", "username": username},
+                    kind="message",
+                    approval_code=config.ONBOARDING_TRAINING_NOTICE_APPROVAL_CODE,
+                    delete_draft_after_send=True,
+                )
+                draft_ids["新人入职通知"] = notice_draft.id
+
+            if "入职信息同步" in gated_by_name and config.GROUP_REGULARIZATION_SYNC:
+                sync_draft = await queue_group_message(
+                    config.GROUP_REGULARIZATION_SYNC,
+                    gated_by_name["入职信息同步"],
+                    candidate=f"onboarding_training_sync:{username}",
+                    expected_stage="waiting_ssc_onboarding_training_sync",
+                    updates={"stage": "onboarding_training_sync_sent", "username": username},
+                    kind="message",
+                    approval_code=config.ONBOARDING_TRAINING_SYNC_APPROVAL_CODE,
+                    delete_draft_after_send=True,
+                )
+                draft_ids["入职信息同步"] = sync_draft.id
+
+            if "欢迎" in gated_by_name:
+                department_text = ""
+                for name, body in sections:
+                    if name != "欢迎" and body:
+                        dept_match = re.search(r"部门-小组\s*[:：]\s*([^\n]+)", body)
+                        if dept_match:
+                            department_text = dept_match.group(1).strip()
+                            break
+                welcome_destination = match_department_group(
+                    department_text, config.ANNIVERSARY_GROUP_RULES
+                )
+                if welcome_destination:
+                    welcome_draft = await queue_group_message(
+                        welcome_destination,
+                        gated_by_name["欢迎"],
+                        candidate=f"onboarding_training_welcome:{username}",
+                        expected_stage="waiting_ssc_onboarding_training_welcome",
+                        updates={"stage": "onboarding_training_welcome_sent", "username": username},
+                        kind="message",
+                        approval_code=config.ONBOARDING_TRAINING_WELCOME_APPROVAL_CODE,
+                        delete_draft_after_send=True,
+                    )
+                    draft_ids["欢迎"] = welcome_draft.id
+                else:
+                    missing.append("欢迎（未匹配到部门对应的全员群）")
+
+            if missing:
+                await client.send_message(
+                    reviewer.id,
+                    "新人培训入职信息提示：未找到「" + "、".join(missing) + "」对应内容。",
+                    parse_mode=None,
+                )
+
+            onboarding_training_events.set(event_key, {
+                "status": "queued", "username": username, "draft_ids": draft_ids,
+                "source_file_id": source_file.get("id"),
+            })
+            log.info(
+                "[新人培训] @%s 的入职信息已处理，草稿=%s", username, draft_ids,
+            )
+        except Exception as exc:
+            onboarding_training_events.set(event_key, {
+                "status": "failed", "reason": str(exc)[:500],
+            })
+            log.exception("[新人培训] msg_id=%s 处理失败", event.message.id)
+            await client.send_message(
+                reviewer.id,
+                "新人培训入职信息处理失败，请查看机器人日志。错误：" + str(exc)[:300],
                 parse_mode=None,
             )
 
