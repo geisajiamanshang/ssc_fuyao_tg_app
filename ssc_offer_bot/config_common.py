@@ -83,6 +83,10 @@ ONBOARDING_TRAINING_OUTPUT_FOLDER_ID = os.environ.get(
 # 把紧邻的上一条图文通知转发到收藏夹，经审批码7一次性广播到全部全员群。
 ALL_STAFF_NOTICE_TRIGGER_KEYWORD = "全员群"
 
+# 洛羽-SSC主管-CN私聊里出现账号申请类关键词后自动生成申请草稿；按用户名
+# 匹配（比显示名稳定，改昵称不受影响）。
+ACCOUNT_REQUEST_MANAGER_USERNAME = "huakaifuguiyes"
+
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({
     -1003559652510,  # HRBP沟通群

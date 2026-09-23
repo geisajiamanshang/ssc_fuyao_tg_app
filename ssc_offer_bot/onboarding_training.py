@@ -18,6 +18,7 @@ from daily_reports import DRIVE_FILES_URL, _drive_session
 GATED_SECTION_NAMES = ("新人入职通知", "入职信息同步", "欢迎")
 _SECTION_RE = re.compile(r"(?m)^[ \t]*【(?P<name>[^【】\r\n]+)】[ \t]*$")
 _TG_FIELD_RE = re.compile(r"(?:TG|Telegram|telegram)\s*[:：@]*\s*@?([A-Za-z][A-Za-z0-9_]{3,})")
+_NAME_FIELD_RE = re.compile(r"花名\s*[:：]\s*([^\s,，;；]+)")
 
 
 def _escape_query(value):
@@ -120,3 +121,18 @@ class OnboardingTrainingDriveRepository:
             if username_matches_text(username, text):
                 return text, drive_file
         raise FileNotFoundError(f"未在入职助手/输出文件夹中找到 @{username.lstrip('@')} 的入职信息")
+
+    def find_by_display_name(self, name):
+        """按花名在最近修改的候选文件里查找该人的入职信息全文，供账号申请等
+        需要按花名反查员工资料的场景使用（与find_by_username按TG用户名反查
+        对应，只是查找键不同）。"""
+        target = (name or "").strip()
+        if not target:
+            raise ValueError("花名为空，无法查找")
+        session, auth_params = _drive_session()
+        candidates = self._recent_candidate_files(session, auth_params)
+        for drive_file in candidates:
+            text = self._download_text(session, auth_params, drive_file)
+            if any(match.group(1).strip() == target for match in _NAME_FIELD_RE.finditer(text)):
+                return text, drive_file
+        raise FileNotFoundError(f"未在入职助手/输出文件夹中找到花名为{target}的入职信息")

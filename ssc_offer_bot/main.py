@@ -43,16 +43,25 @@ SSC Offer 审批流转自动化 主程序。
              的最新内容，SSC可以在两次发送之间修改收藏夹草稿
           -> 第5个群发送成功后自动删除收藏夹里的这条草稿
 
+  场景八：洛羽-SSC主管-CN私聊里出现账号申请类关键词（外事号/推特号/申请
+          邮箱/注册TG等，转发消息或直接打字均可）
+          -> 随机30-60秒后自动回复"ok"
+          -> 从转发来源昵称或消息文本里提取花名，到Drive云端 入职助手/
+             输出 文件夹按花名反查该人的入职信息，生成【员工帐号申请】
+          -> 发到收藏夹，SSC发送审批码（测试5/5）后按关键词是否含"外事"
+             放行到对应的外事/工作帐号需求群
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7”，
-     生产审批使用“1/2/3/11/21/6/6.1/6.2/7”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5”，
+     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5”。
 """
 
 import asyncio
 import logging
+import random
 import unicodedata
 import re
 from datetime import datetime, timezone
@@ -95,6 +104,13 @@ from onboarding_training import (
     OnboardingTrainingDriveRepository,
     split_named_sections,
 )
+from account_request import (
+    account_request_category,
+    build_account_request_text,
+    matches_account_request_keyword,
+    name_from_direct_text,
+    name_from_forward_sender_name,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -131,6 +147,8 @@ onboarding_training_drive = OnboardingTrainingDriveRepository(
 )
 all_staff_notice_events = StateStore(config.ALL_STAFF_NOTICE_STATE_PATH)
 all_staff_notice_lock = asyncio.Lock()
+account_request_events = StateStore(config.ACCOUNT_REQUEST_STATE_PATH)
+account_request_lock = asyncio.Lock()
 
 
 async def forward_onboarding_to_hrgs(message, chat_id):
@@ -906,6 +924,97 @@ async def on_all_staff_notice_trigger(event):
             await client.send_message(
                 reviewer.id,
                 "全员群通知转发失败，请查看机器人日志。错误：" + str(exc)[:300],
+                parse_mode=None,
+            )
+
+
+async def _send_delayed_ok_reply(chat_id, message_id, delay_seconds):
+    """随机延迟30-60秒回复"ok"，让自动回复看起来更像人工处理，而不是秒回。"""
+    try:
+        await asyncio.sleep(delay_seconds)
+        await client.send_message(chat_id, "ok", reply_to=message_id, parse_mode=None)
+    except Exception:
+        log.exception("[账号申请] 延迟回复ok失败：chat_id=%s msg_id=%s", chat_id, message_id)
+
+
+@client.on(events.NewMessage(incoming=True))
+async def on_account_request_trigger(event):
+    if not config.ACCOUNT_REQUEST_ENABLED:
+        return
+    if not event.is_private:
+        return
+    sender = await event.get_sender()
+    sender_username = (getattr(sender, "username", "") or "").casefold()
+    if sender_username != config.ACCOUNT_REQUEST_MANAGER_USERNAME.casefold():
+        return
+    text = event.raw_text or ""
+    if not matches_account_request_keyword(text):
+        return
+
+    event_key = f"{event.chat_id}:{event.message.id}"
+    async with account_request_lock:
+        previous = account_request_events.get(event_key)
+        if previous and previous.get("status") in {"processing", "queued"}:
+            return
+        account_request_events.set(event_key, {"status": "processing"})
+
+        # "ok"回复走独立的延迟任务，不阻塞后面生成草稿；即使查找信息失败，
+        # 洛羽也能先看到消息已经被处理，而不是像没反应一样。
+        asyncio.create_task(_send_delayed_ok_reply(
+            event.chat_id, event.message.id, random.uniform(30, 60)
+        ))
+
+        reviewer = await get_ssc_reviewer()
+        try:
+            category = account_request_category(text)
+
+            forward_name = ""
+            forward = event.message.forward
+            if forward:
+                forward_sender = getattr(forward, "sender", None)
+                display_name = (
+                    getattr(forward_sender, "first_name", "") if forward_sender
+                    else (getattr(forward, "from_name", "") or "")
+                )
+                forward_name = name_from_forward_sender_name(display_name)
+            target_name = forward_name or name_from_direct_text(text)
+            if not target_name:
+                raise RuntimeError("未能从消息中识别出申请人花名")
+
+            profile_text, source_file = await asyncio.to_thread(
+                onboarding_training_drive.find_by_display_name, target_name
+            )
+            fields = parse_kv_fields(profile_text)
+            draft_text = build_account_request_text(category, fields)
+
+            candidate_key = f"account_request:{event_key}"
+            destination = (
+                config.GROUP_ACCOUNT_REQUEST_FOREIGN if category == "外事"
+                else config.GROUP_ACCOUNT_REQUEST_WORK
+            )
+            draft = await queue_group_message(
+                destination, draft_text,
+                candidate=candidate_key, expected_stage="waiting_ssc_account_request",
+                updates={"stage": "account_request_sent"}, kind="message",
+                approval_code=config.ACCOUNT_REQUEST_APPROVAL_CODE,
+            )
+            account_request_events.set(event_key, {
+                "status": "queued", "draft_id": draft.id,
+                "category": category, "name": target_name,
+                "source_file_id": source_file.get("id"),
+            })
+            log.info(
+                "[账号申请] %s（%s类）已生成草稿msg_id=%s，等待SSC发送%s",
+                target_name, category, draft.id, config.ACCOUNT_REQUEST_APPROVAL_CODE,
+            )
+        except Exception as exc:
+            account_request_events.set(event_key, {
+                "status": "failed", "reason": str(exc)[:500],
+            })
+            log.exception("[账号申请] msg_id=%s 处理失败", event.message.id)
+            await client.send_message(
+                reviewer.id,
+                "账号申请处理失败，请查看机器人日志。错误：" + str(exc)[:300],
                 parse_mode=None,
             )
 
