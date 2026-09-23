@@ -32,6 +32,12 @@ PRE_ONBOARDING_APPROVAL_CODE = "测试11" if ENVIRONMENT == "test" else "11"
 # 转正倒数4天提醒触发后，员工本人的转正申请单独走这个审批码放行到联合管理工作群；
 # 与预转正提醒的审批码（2）并存、互不影响，SSC可在收藏夹改完内容再批准。
 REGULARIZATION_APPLICATION_APPROVAL_CODE = "测试21" if ENVIRONMENT == "test" else "21"
+# 新人培训群"新人培训考试通过"触发后，三段信息分别走各自审批码放行：
+# 6 -> 新人入职通知转联合管理群；6.1 -> 入职信息同步转人事数据同步-SSC3组；
+# 6.2 -> 欢迎消息按部门转对应全员群。三者互不影响，可分别在收藏夹改完内容再批准。
+ONBOARDING_TRAINING_NOTICE_APPROVAL_CODE = "测试6" if ENVIRONMENT == "test" else "6"
+ONBOARDING_TRAINING_SYNC_APPROVAL_CODE = "测试6.1" if ENVIRONMENT == "test" else "6.1"
+ONBOARDING_TRAINING_WELCOME_APPROVAL_CODE = "测试6.2" if ENVIRONMENT == "test" else "6.2"
 APPROVAL_CODES = frozenset({
     OFFER_APPROVAL_CODE,
     REGULARIZATION_APPROVAL_CODE,
@@ -40,11 +46,16 @@ APPROVAL_CODES = frozenset({
     REGULARIZATION_TODAY_SYNC_APPROVAL_CODE,
     PRE_ONBOARDING_APPROVAL_CODE,
     REGULARIZATION_APPLICATION_APPROVAL_CODE,
+    ONBOARDING_TRAINING_NOTICE_APPROVAL_CODE,
+    ONBOARDING_TRAINING_SYNC_APPROVAL_CODE,
+    ONBOARDING_TRAINING_WELCOME_APPROVAL_CODE,
 })
 DAILY_REPORT_ENABLED = ENVIRONMENT == "prod"
 HRGS_FORWARD_ENABLED = ENVIRONMENT == "prod"
 # 预入职登记群ID尚未在该环境配置完成前自动跳过，不报错也不误发。
 PRE_ONBOARDING_FORWARD_ENABLED = bool(GROUP_PRE_ONBOARDING)
+# 新人培训群ID尚未在该环境配置完成前自动跳过，不报错也不误发。
+ONBOARDING_TRAINING_ENABLED = bool(GROUP_TRAINING)
 # 生产只接受指定机器人的提醒；测试群允许SSC人工粘贴提醒做联调。
 ALLOW_MANUAL_TRIGGERS = ENVIRONMENT == "test"
 # GROUP_REGULARIZATION_SYNC / GROUP_PRE_ONBOARDING 未来若在某环境留空（None），
@@ -64,6 +75,7 @@ if ENVIRONMENT == "test":
         GROUP_HRBP,
         GROUP_REGULARIZATION_TRIGGER,
         GROUP_ANNIVERSARY_TRIGGER,
+        *([GROUP_TRAINING] if GROUP_TRAINING else []),
     }
     _unsafe = _test_chat_ids & PRODUCTION_CHAT_IDS
     if _unsafe:

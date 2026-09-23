@@ -29,6 +29,8 @@ GROUP_REGULARIZATION_SYNC = int(os.environ.get(
 # 再通过环境变量 GROUP_PRE_ONBOARDING 或直接替换默认值 "0" 填入。
 # 留空（0）时该功能自动跳过，不影响其余流程，也不会误发到未确认的群。
 GROUP_PRE_ONBOARDING = int(os.environ.get("GROUP_PRE_ONBOARDING", "0")) or None
+# 新人培训群：等待补充真实群号前先留空（不影响其他功能，功能自动禁用直到配置）
+GROUP_TRAINING = int(os.environ.get("GROUP_TRAINING", "0")) or None
 
 # ========== 审批链角色（填 Telegram 用户名，不带 @） ==========
 LEADER_FIRST = "DaBai10010"        # 一级审批：白一舟，收到"好的"作为一级通过标志
@@ -48,6 +50,7 @@ DB_PATH = "offer_state.json"
 DAILY_REPORT_STATE_PATH = DB_PATH + ".daily_reports.json"
 REGULARIZATION_STATE_PATH = DB_PATH + ".regularization.json"
 ANNIVERSARY_STATE_PATH = DB_PATH + ".anniversary.json"
+ONBOARDING_TRAINING_STATE_PATH = DB_PATH + ".onboarding_training.json"
 
 # ========== 日志文件 ==========
 LOG_PATH = "bot.log"
