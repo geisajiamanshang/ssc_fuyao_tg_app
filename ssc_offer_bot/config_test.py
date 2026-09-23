@@ -45,6 +45,10 @@ ANNIVERSARY_GROUP_RULES = [
     {"name": "测试-技术效能", "keywords": ["技术部", "效能部", "技术效能部", "技术中心", "研发部"], "chat_id": -5412973830},
 ]
 
+# 账号申请转发目标群：外事类目/工作类目分别对应两个不同的需求群。
+GROUP_ACCOUNT_REQUEST_FOREIGN = -5414021470  # 测外事帐号需求群-SSC3组
+GROUP_ACCOUNT_REQUEST_WORK = -5309896717     # 测工作帐号需求群-SCC3组
+
 # 与生产实例共用收藏夹时，测试审批码必须带前缀，避免两套实例抢单。
 OFFER_APPROVAL_CODE = "测试1"
 REGULARIZATION_APPROVAL_CODE = "测试2"
@@ -65,4 +69,5 @@ REGULARIZATION_STATE_PATH = DB_PATH + ".regularization.json"
 ANNIVERSARY_STATE_PATH = DB_PATH + ".anniversary.json"
 ONBOARDING_TRAINING_STATE_PATH = DB_PATH + ".onboarding_training.json"
 ALL_STAFF_NOTICE_STATE_PATH = DB_PATH + ".all_staff_notice.json"
+ACCOUNT_REQUEST_STATE_PATH = DB_PATH + ".account_request.json"
 LOG_PATH = "bot.test.log"

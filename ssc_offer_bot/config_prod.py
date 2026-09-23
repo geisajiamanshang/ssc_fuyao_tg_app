@@ -49,6 +49,10 @@ ANNIVERSARY_GROUP_RULES = [
     {"name": "恒睿-技术/效能部-全员群", "keywords": ["技术部", "效能部", "技术效能部", "技术中心", "研发部"], "chat_id": -1003946619557},
 ]
 
+# 账号申请转发目标群：生产环境群ID待补充，留空时功能自动跳过，不影响其余流程。
+GROUP_ACCOUNT_REQUEST_FOREIGN = int(os.environ.get("GROUP_ACCOUNT_REQUEST_FOREIGN", "0")) or None
+GROUP_ACCOUNT_REQUEST_WORK = int(os.environ.get("GROUP_ACCOUNT_REQUEST_WORK", "0")) or None
+
 # ========== 本地状态文件 ==========
 DB_PATH = "offer_state.json"
 DAILY_REPORT_STATE_PATH = DB_PATH + ".daily_reports.json"
@@ -56,6 +60,7 @@ REGULARIZATION_STATE_PATH = DB_PATH + ".regularization.json"
 ANNIVERSARY_STATE_PATH = DB_PATH + ".anniversary.json"
 ONBOARDING_TRAINING_STATE_PATH = DB_PATH + ".onboarding_training.json"
 ALL_STAFF_NOTICE_STATE_PATH = DB_PATH + ".all_staff_notice.json"
+ACCOUNT_REQUEST_STATE_PATH = DB_PATH + ".account_request.json"
 
 # ========== 日志文件 ==========
 LOG_PATH = "bot.log"
