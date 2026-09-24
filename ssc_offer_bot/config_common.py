@@ -108,3 +108,7 @@ TEST_CHAT_IDS = frozenset({
     -1004345123072,  # 测试-渠道商务全员群
     -5412973830,  # 测试-技术效能全员群
 })
+
+# Offer审批链（场景二）里，领导除了回复文字，也可以直接在@他的审批提示消息
+# 上点这些表情作为同意；沿用parsers.is_approval里认可的"👌"，不额外放宽。
+APPROVAL_REACTION_EMOJIS = frozenset({"👌"})
