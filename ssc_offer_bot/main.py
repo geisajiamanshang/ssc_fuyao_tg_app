@@ -1314,7 +1314,20 @@ async def process_leadership_reply(event):
     msg = event.message
     sender = await event.get_sender()
     username = (getattr(sender, "username", "") or "").casefold()
-    if username not in {role_username(r) for r in ("first", "second", "final")} or not is_approval(msg.raw_text or ""):
+    if not is_approval(msg.raw_text or ""):
+        return
+    if username not in {role_username(r) for r in ("first", "second", "final")}:
+        # 消息本身像是审批回复（"好的"/"👌"等），但发送人TG用户名对不上任何
+        # 已配置的一级/二级/终审账号——很可能是账号改了用户名或配置滞后，
+        # 以前这种情况完全静默、SSC毫无感知；现在只要对方明确回复了某条
+        # 消息（不是随口一句无引用的"好的"），就提醒SSC核实，避免审批卡死
+        # 却没人知道。
+        if msg.reply_to_msg_id:
+            reviewer = await get_ssc_reviewer()
+            await client.send_message(reviewer.id,
+                "收到疑似审批回复「" + (msg.raw_text or "") + "」，但发送人TG用户名未匹配到任何已配置的审批人"
+                + f"（一级@{role_username('first')}、二级@{role_username('second')}、终审@{role_username('final')}），"
+                + "请核实对方账号用户名是否变更，或更新配置。", parse_mode=None)
         return
     if batch_approval(msg.raw_text) and username == role_username("final"):
         await process_batch_final(event)
@@ -1326,6 +1339,12 @@ async def process_leadership_reply(event):
         records = [(name, rec)] if rec else []
     if not records:
         log.warning("[Offer审批] 未找到可关联的Offer，msg_id=%s", msg.id)
+        if msg.reply_to_msg_id:
+            reviewer = await get_ssc_reviewer()
+            await client.send_message(reviewer.id,
+                f"@{username} 回复了疑似审批消息「" + (msg.raw_text or "") + "」"
+                + f"（回复的消息id={msg.reply_to_msg_id}），但未能关联到任何候选人的Offer记录，请核查。",
+                parse_mode=None)
         return
     await recover_approval_evidence(event, records)
     for name, rec in records:
