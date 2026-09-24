@@ -49,6 +49,18 @@ ANNIVERSARY_GROUP_RULES = [
 GROUP_ACCOUNT_REQUEST_FOREIGN = -5414021470  # 测外事帐号需求群-SSC3组
 GROUP_ACCOUNT_REQUEST_WORK = -5309896717     # 测工作帐号需求群-SCC3组
 
+# 离职审批(83 离职信息同步)的第二个目标群：测试群ID待补充，先用
+# list_chats.py 跑一遍拿到真实ID再填到 GROUP_OFFBOARDING_BUSINESS_SYNC；
+# 留空时83只转发到 GROUP_REGULARIZATION_SYNC 一个群，不影响其余流程。
+GROUP_OFFBOARDING_BUSINESS_SYNC = (
+    int(os.environ["GROUP_OFFBOARDING_BUSINESS_SYNC"])
+    if os.environ.get("GROUP_OFFBOARDING_BUSINESS_SYNC") else None
+)
+# 离职助手/输出 文件夹的测试环境ID待补充；留空时离职审批功能整体自动跳过。
+OFFBOARDING_OUTPUT_FOLDER_ID = os.environ.get(
+    "TEST_OFFBOARDING_OUTPUT_FOLDER_ID", OFFBOARDING_OUTPUT_FOLDER_ID
+)
+
 # 与生产实例共用收藏夹时，测试审批码必须带前缀，避免两套实例抢单。
 OFFER_APPROVAL_CODE = "测试1"
 REGULARIZATION_APPROVAL_CODE = "测试2"
@@ -70,4 +82,5 @@ ANNIVERSARY_STATE_PATH = DB_PATH + ".anniversary.json"
 ONBOARDING_TRAINING_STATE_PATH = DB_PATH + ".onboarding_training.json"
 ALL_STAFF_NOTICE_STATE_PATH = DB_PATH + ".all_staff_notice.json"
 ACCOUNT_REQUEST_STATE_PATH = DB_PATH + ".account_request.json"
+OFFBOARDING_STATE_PATH = DB_PATH + ".offboarding.json"
 LOG_PATH = "bot.test.log"

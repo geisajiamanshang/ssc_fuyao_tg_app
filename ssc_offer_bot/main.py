@@ -111,6 +111,15 @@ from account_request import (
     name_from_direct_text,
     name_from_forward_sender_name,
 )
+from offboarding import (
+    OffboardingApprovalFormRepository,
+    OffboardingDriveRepository,
+    build_account_reclaim_text,
+    classify_offboarding_sections,
+    extract_offboarding_contact_tg,
+    extract_offboarding_name,
+    matches_offboarding_keyword,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -149,6 +158,10 @@ all_staff_notice_events = StateStore(config.ALL_STAFF_NOTICE_STATE_PATH)
 all_staff_notice_lock = asyncio.Lock()
 account_request_events = StateStore(config.ACCOUNT_REQUEST_STATE_PATH)
 account_request_lock = asyncio.Lock()
+offboarding_events = StateStore(config.OFFBOARDING_STATE_PATH)
+offboarding_lock = asyncio.Lock()
+offboarding_drive = OffboardingDriveRepository(config.OFFBOARDING_OUTPUT_FOLDER_ID)
+offboarding_process_drive = OffboardingApprovalFormRepository(config.OFFBOARDING_PROCESS_FOLDER_ID)
 
 
 async def forward_onboarding_to_hrgs(message, chat_id):
@@ -368,6 +381,46 @@ async def on_ssc_send_approval(event):
                             await client.delete_messages(reviewer.id, [item["draft_id"]])
                         except Exception:
                             log.exception("[SSC审批] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
+            elif item["kind"] == "offboarding_salary":
+                # 薪水结算信息不进任何群，直接私发给员工本人的工作TG。
+                recipient = await client.get_entity(item["destination"])
+                sent = await client.send_message(recipient, text, parse_mode=None)
+                state.update(item["candidate"], **updates)
+                outbox.update(key, status="sent", sent_msg_id=sent.id)
+                log.info("[SSC审批] 薪水结算信息已私发给%s msg_id=%s",
+                         item["destination"], sent.id)
+                if item.get("delete_draft_after_send"):
+                    try:
+                        await client.delete_messages(reviewer.id, [item["draft_id"]])
+                    except Exception:
+                        log.exception("[SSC审批] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
+            elif item["kind"] == "offboarding_sync":
+                # 离职信息同步一次性转发到全部目标群，不是像全员群广播那样
+                # 逐个放行；某个群失败不影响其它群，但失败的要报给SSC核实。
+                failed = []
+                for destination in item["destinations"]:
+                    try:
+                        await client.send_message(destination, text, parse_mode=None)
+                    except Exception:
+                        log.exception("[SSC审批] 离职信息同步转发失败，目标群=%s", destination)
+                        failed.append(destination)
+                state.update(item["candidate"], **updates)
+                outbox.update(key, status="sent" if not failed else "partially_failed",
+                             failed_destinations=failed)
+                if failed:
+                    await client.send_message(
+                        reviewer.id,
+                        "离职信息同步部分群发送失败：" + "、".join(str(d) for d in failed)
+                        + "，请核实后手动补发。",
+                        parse_mode=None,
+                    )
+                else:
+                    log.info("[SSC审批] 离职信息同步已转发到全部%s个群", len(item["destinations"]))
+                if item.get("delete_draft_after_send") and not failed:
+                    try:
+                        await client.delete_messages(reviewer.id, [item["draft_id"]])
+                    except Exception:
+                        log.exception("[SSC审批] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
             else:
                 sent = await client.send_message(item["destination"], text,
                                                  file=media, reply_to=item["reply_to"], parse_mode=None)
@@ -1017,6 +1070,259 @@ async def on_account_request_trigger(event):
                 "账号申请处理失败，请查看机器人日志。错误：" + str(exc)[:300],
                 parse_mode=None,
             )
+
+
+# ==================== 场景：恒睿公司-联合管理群离职审批自动化 ====================
+async def queue_offboarding_private_message(username, text, *, candidate, expected_stage,
+                                            updates, approval_code):
+    """离职薪水结算信息不进任何群，直接私发给员工本人的工作TG；复用SSC收
+    藏夹审批放行的模式，但目的地是个人聊天，不经 queue_group_message 校验
+    的固定群白名单。"""
+    async with ssc_send_lock:
+        reviewer = await get_ssc_reviewer()
+        draft = await client.send_message(reviewer.id, text, parse_mode=None)
+        outbox.set(str(draft.id), {
+            "draft_id": draft.id, "destination": username, "reply_to": None,
+            "candidate": candidate, "expected_stage": expected_stage,
+            "updates": updates, "id_field": None, "kind": "offboarding_salary",
+            "status": "pending", "review_chat_id": reviewer.id,
+            "approval_code": str(approval_code), "delete_draft_after_send": True,
+        })
+        state.update(candidate, stage=expected_stage)
+        log.info("[离职审批] 薪水结算草稿msg_id=%s，等待SSC发送%s私发给%s",
+                 draft.id, approval_code, username)
+        return draft
+
+
+async def queue_offboarding_sync_broadcast(destinations, text, *, candidate, expected_stage,
+                                           updates, approval_code):
+    """离职信息同步一次性转发到多个群：一个审批码触发全部发送，不像全员群
+    广播那样逐个放行——这两个目标群关系紧密，没必要拆成两次核对。"""
+    for destination in destinations:
+        if destination not in config.ALLOWED_DESTINATION_IDS:
+            raise RuntimeError(
+                f"[{config.ENVIRONMENT}] 目标群 {destination} 不在当前环境白名单，已阻止发送"
+            )
+    async with ssc_send_lock:
+        reviewer = await get_ssc_reviewer()
+        draft = await client.send_message(reviewer.id, text, parse_mode=None)
+        outbox.set(str(draft.id), {
+            "draft_id": draft.id, "destinations": list(destinations), "reply_to": None,
+            "candidate": candidate, "expected_stage": expected_stage,
+            "updates": updates, "id_field": None, "kind": "offboarding_sync",
+            "status": "pending", "review_chat_id": reviewer.id,
+            "approval_code": str(approval_code), "delete_draft_after_send": True,
+        })
+        state.update(candidate, stage=expected_stage)
+        log.info("[离职审批] 离职信息同步草稿msg_id=%s，等待SSC发送%s一次性转发到%s个群",
+                 draft.id, approval_code, len(destinations))
+        return draft
+
+
+async def _wait_for_offboarding_sync_file(name, reviewer_id, event_key):
+    """反复在Drive查找该员工的离职信息同步文件；找不到不算失败，每
+    config.OFFBOARDING_RETRY_POLL_SECONDS 秒重新查询一次，只在第一次找不到
+    时告知SSC正在重试，避免刷屏，找到后把结果原样返回继续后续处理。"""
+    notified = False
+    while True:
+        try:
+            return await asyncio.to_thread(offboarding_drive.find_by_name, name)
+        except FileNotFoundError:
+            if not notified:
+                offboarding_events.set(event_key, {"status": "waiting_sync_file", "name": name})
+                await client.send_message(
+                    reviewer_id,
+                    name + " 离职信息同步文件暂未找到，将每"
+                    + str(config.OFFBOARDING_RETRY_POLL_SECONDS // 60)
+                    + "分钟自动重新查询，找到后继续处理。",
+                    parse_mode=None,
+                )
+                notified = True
+            await asyncio.sleep(config.OFFBOARDING_RETRY_POLL_SECONDS)
+
+
+async def _wait_for_offboarding_approval_form(name, reviewer_id, event_key):
+    """反复检查 当月离职明细 文件夹中该员工的员工离职审批表；找不到不算
+    失败，每 config.OFFBOARDING_RETRY_POLL_SECONDS 秒重新查询一次，只在第
+    一次找不到时告知SSC正在重试并记录状态，找到后把云端链接发到收藏夹。"""
+    notified = False
+    while True:
+        try:
+            link = await asyncio.to_thread(
+                offboarding_process_drive.find_approval_form_link, name
+            )
+        except Exception:
+            log.exception("[离职审批] %s 检查离职审批表失败", name)
+            await client.send_message(
+                reviewer_id, name + " 员工离职审批表检查失败，请查看机器人日志。",
+                parse_mode=None,
+            )
+            return
+        if link:
+            await client.send_message(
+                reviewer_id, name + " 员工离职审批表：" + link, parse_mode=None
+            )
+            return
+        if not notified:
+            offboarding_events.set(event_key, {"status": "waiting_approval_form", "name": name})
+            await client.send_message(
+                reviewer_id,
+                "当月离职明细文件夹中暂未找到" + name + "的员工离职审批表，将每"
+                + str(config.OFFBOARDING_RETRY_POLL_SECONDS // 60)
+                + "分钟自动重新查询。",
+                parse_mode=None,
+            )
+            notified = True
+        await asyncio.sleep(config.OFFBOARDING_RETRY_POLL_SECONDS)
+
+
+@client.on(events.NewMessage())
+async def on_offboarding_trigger(event):
+    if not config.OFFBOARDING_ENABLED:
+        return
+    if event.chat_id != config.GROUP_LEADERSHIP or event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = event.raw_text or ""
+    if not matches_offboarding_keyword(text):
+        return
+    name = extract_offboarding_name(text)
+    if not name:
+        log.info(
+            "[离职审批] 触发消息未找到员工姓名：chat_id=%s msg_id=%s",
+            event.chat_id, event.message.id,
+        )
+        return
+
+    log.info(
+        "[离职审批] 已捕捉触发消息：environment=%s chat_id=%s msg_id=%s name=%s",
+        config.ENVIRONMENT, event.chat_id, event.message.id, name,
+    )
+
+    event_key = f"{event.chat_id}:{event.message.id}"
+    async with offboarding_lock:
+        previous = offboarding_events.get(event_key)
+        if previous and previous.get("status") in {
+            "processing", "queued", "waiting_sync_file", "waiting_approval_form",
+        }:
+            return
+        offboarding_events.set(event_key, {"status": "processing"})
+
+    # 找同步文件/离职审批表可能需要反复轮询（每次间隔
+    # config.OFFBOARDING_RETRY_POLL_SECONDS 秒），不在锁内等待，避免卡住
+    # 其它员工的离职触发消息。
+    reviewer = await get_ssc_reviewer()
+    try:
+        full_text, source_file = await _wait_for_offboarding_sync_file(
+            name, reviewer.id, event_key
+        )
+        sections = split_named_sections(full_text)
+        if not sections:
+            raise RuntimeError("离职信息同步文件未按【段落名】格式分区，无法处理")
+        by_role, reference = classify_offboarding_sections(sections)
+        fields = parse_kv_fields(full_text)
+
+        # 未归类的分区是纯参考资料，原样分条发到收藏夹，不设审批码，
+        # 与新人培训入职信息的处理方式一致。
+        for section_name, body in reference:
+            await _send_saved_text(reviewer.id, f"【{section_name}】\n\n{body}")
+
+        missing = []
+        draft_ids = {}
+
+        if "forward" in by_role:
+            draft = await queue_group_message(
+                config.GROUP_LEADERSHIP, by_role["forward"][1],
+                candidate=f"offboarding_forward:{event_key}",
+                expected_stage="waiting_ssc_offboarding_forward",
+                updates={"stage": "offboarding_forward_sent", "name": name},
+                kind="message", approval_code=config.OFFBOARDING_FORWARD_APPROVAL_CODE,
+                delete_draft_after_send=True,
+            )
+            draft_ids["forward"] = draft.id
+        else:
+            missing.append("离职确认信息")
+
+        if "salary" in by_role:
+            contact = extract_offboarding_contact_tg(full_text)
+            if contact:
+                draft = await queue_offboarding_private_message(
+                    contact, by_role["salary"][1],
+                    candidate=f"offboarding_salary:{event_key}",
+                    expected_stage="waiting_ssc_offboarding_salary",
+                    updates={"stage": "offboarding_salary_sent", "name": name},
+                    approval_code=config.OFFBOARDING_SALARY_APPROVAL_CODE,
+                )
+                draft_ids["salary"] = draft.id
+            else:
+                missing.append("薪水结算信息（未找到员工本人工作TG）")
+        else:
+            missing.append("薪水结算信息")
+
+        if "sync" in by_role:
+            sync_destinations = [
+                d for d in (config.GROUP_REGULARIZATION_SYNC,
+                            config.GROUP_OFFBOARDING_BUSINESS_SYNC)
+                if d
+            ]
+            if sync_destinations:
+                draft = await queue_offboarding_sync_broadcast(
+                    sync_destinations, by_role["sync"][1],
+                    candidate=f"offboarding_sync:{event_key}",
+                    expected_stage="waiting_ssc_offboarding_sync",
+                    updates={"stage": "offboarding_sync_sent", "name": name},
+                    approval_code=config.OFFBOARDING_SYNC_APPROVAL_CODE,
+                )
+                draft_ids["sync"] = draft.id
+            else:
+                missing.append("离职信息同步（目标群未配置）")
+        else:
+            missing.append("离职信息同步")
+
+        if "account_reclaim" in by_role:
+            reclaim_body = "【员工帐号回收】\n\n" + by_role["account_reclaim"][1]
+        else:
+            reclaim_body = build_account_reclaim_text(name, fields)
+        if config.GROUP_ACCOUNT_REQUEST_WORK:
+            draft = await queue_group_message(
+                config.GROUP_ACCOUNT_REQUEST_WORK, reclaim_body,
+                candidate=f"offboarding_account_reclaim:{event_key}",
+                expected_stage="waiting_ssc_offboarding_account_reclaim",
+                updates={"stage": "offboarding_account_reclaim_sent", "name": name},
+                kind="message", approval_code=config.OFFBOARDING_ACCOUNT_RECLAIM_APPROVAL_CODE,
+                delete_draft_after_send=True,
+            )
+            draft_ids["account_reclaim"] = draft.id
+        else:
+            missing.append("员工帐号回收（目标群未配置）")
+
+        if missing:
+            await client.send_message(
+                reviewer.id,
+                name + " 离职信息处理提示：未找到「" + "、".join(missing) + "」对应内容，请核实。",
+                parse_mode=None,
+            )
+
+        offboarding_events.set(event_key, {
+            "status": "checking_approval_form", "name": name, "draft_ids": draft_ids,
+            "source_file_id": source_file.get("id"),
+        })
+        await _wait_for_offboarding_approval_form(name, reviewer.id, event_key)
+
+        offboarding_events.set(event_key, {
+            "status": "queued", "name": name, "draft_ids": draft_ids,
+            "source_file_id": source_file.get("id"),
+        })
+        log.info("[离职审批] %s 的离职信息已处理，草稿=%s", name, draft_ids)
+    except Exception as exc:
+        offboarding_events.set(event_key, {
+            "status": "failed", "reason": str(exc)[:500],
+        })
+        log.exception("[离职审批] msg_id=%s 处理失败", event.message.id)
+        await client.send_message(
+            reviewer.id,
+            "离职审批信息处理失败，请查看机器人日志。错误：" + str(exc)[:300],
+            parse_mode=None,
+        )
 
 
 @client.on(events.NewMessage())
