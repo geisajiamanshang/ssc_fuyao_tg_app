@@ -34,6 +34,16 @@ class StripHeaderFooterTests(TestCase):
         text = "候选人编码：A1\n候选人姓名：小仙"
         self.assertEqual(strip_header_footer(text), text)
 
+    def test_strips_bp_footer_without_shenpi_suffix(self):
+        # BP原文常见"@oiyr90557 麻烦跟进offer"，没有"审批"两个字，旧正则要求
+        # 必须以"审批"结尾，匹配不上，会跟机器人新加的"请领导审批，谢谢"重复出现。
+        text = "候选人编码：A1\n候选人姓名：小仙\n\n@oiyr90557 麻烦跟进offer"
+        self.assertEqual(strip_header_footer(text), "候选人编码：A1\n候选人姓名：小仙")
+
+    def test_still_strips_bp_footer_with_shenpi_suffix(self):
+        text = "候选人编码：A1\n候选人姓名：小仙\n\n@oiyr90557 麻烦跟进offer审批"
+        self.assertEqual(strip_header_footer(text), "候选人编码：A1\n候选人姓名：小仙")
+
 
 class MentionTests(TestCase):
     def test_missing_flag_still_accepts_exact_username(self):
