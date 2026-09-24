@@ -87,6 +87,27 @@ ALL_STAFF_NOTICE_TRIGGER_KEYWORD = "全员群"
 # 匹配（比显示名稳定，改昵称不受影响）。
 ACCOUNT_REQUEST_MANAGER_USERNAME = "huakaifuguiyes"
 
+# 恒睿公司-联合管理群出现"劝退申请"/"离职申请"关键词后，按员工姓名在Drive
+# 云端 离职助手/输出 文件夹查找该员工的《XX_离职信息同步.txt》。文件夹ID
+# 待补充：打开该Drive文件夹，把浏览器地址栏里 folders/ 后面那串ID填到
+# .env 的 OFFBOARDING_OUTPUT_FOLDER_ID，留空时功能自动跳过。
+OFFBOARDING_OUTPUT_FOLDER_ID = os.environ.get("OFFBOARDING_OUTPUT_FOLDER_ID", "")
+
+# 离职流程 Drive 文件夹（https://drive.google.com/drive/u/1/folders/
+# 1A4XavmJ8O6Rf2LUWPkRd17ybgBTPzJwZ），检查其下 当月离职明细 子文件夹里
+# 是否已有该员工的《XX_员工离职审批表》。这个文件夹ID是直接给定的，不像
+# OFFBOARDING_OUTPUT_FOLDER_ID 那样默认留空，但仍支持用 .env 覆盖。
+OFFBOARDING_PROCESS_FOLDER_ID = os.environ.get(
+    "OFFBOARDING_PROCESS_FOLDER_ID", "1A4XavmJ8O6Rf2LUWPkRd17ybgBTPzJwZ"
+)
+
+# 离职信息同步文件 / 员工离职审批表在Drive中暂未找到时，不算失败，每隔
+# 这么多秒重新查询一次直到找到为止（与新人培训/日报等一次性判定的场景
+# 不同——离职资料本来就可能滞后上传）。
+OFFBOARDING_RETRY_POLL_SECONDS = int(
+    os.environ.get("OFFBOARDING_RETRY_POLL_SECONDS", "300")
+)
+
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({
     -1003559652510,  # HRBP沟通群
@@ -98,6 +119,8 @@ PRODUCTION_CHAT_IDS = frozenset({
     -1003950803307,  # 运营二部全员群
     -1003872014182,  # 渠道/商务部全员群
     -1003946619557,  # 技术/效能部全员群
+    -1004334431069,  # 工作帐号需求群-SSC3组
+    -5164874973,  # 北斗离职人员-同步商务中心群
 })
 
 # 生产环境启动时用于屏蔽这些测试群消息，避免账号同时留在两边时误处理。

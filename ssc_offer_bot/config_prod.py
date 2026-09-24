@@ -49,9 +49,16 @@ ANNIVERSARY_GROUP_RULES = [
     {"name": "恒睿-技术/效能部-全员群", "keywords": ["技术部", "效能部", "技术效能部", "技术中心", "研发部"], "chat_id": -1003946619557},
 ]
 
-# 账号申请转发目标群：生产环境群ID待补充，留空时功能自动跳过，不影响其余流程。
+# 账号申请转发目标群：外事群ID待补充，留空时账号申请（工作类目除外）功能自动跳过。
 GROUP_ACCOUNT_REQUEST_FOREIGN = int(os.environ.get("GROUP_ACCOUNT_REQUEST_FOREIGN", "0")) or None
-GROUP_ACCOUNT_REQUEST_WORK = int(os.environ.get("GROUP_ACCOUNT_REQUEST_WORK", "0")) or None
+# 工作帐号需求群-SSC3组：账号申请(工作类目)和离职审批(84 员工帐号回收)共用同一个群。
+GROUP_ACCOUNT_REQUEST_WORK = int(os.environ.get(
+    "GROUP_ACCOUNT_REQUEST_WORK", "-1004334431069"
+)) or None
+# 北斗离职人员-同步商务中心群：离职审批(83 离职信息同步)转发目标之一。
+GROUP_OFFBOARDING_BUSINESS_SYNC = int(os.environ.get(
+    "GROUP_OFFBOARDING_BUSINESS_SYNC", "-5164874973"
+)) or None
 
 # ========== 本地状态文件 ==========
 DB_PATH = "offer_state.json"
@@ -61,6 +68,7 @@ ANNIVERSARY_STATE_PATH = DB_PATH + ".anniversary.json"
 ONBOARDING_TRAINING_STATE_PATH = DB_PATH + ".onboarding_training.json"
 ALL_STAFF_NOTICE_STATE_PATH = DB_PATH + ".all_staff_notice.json"
 ACCOUNT_REQUEST_STATE_PATH = DB_PATH + ".account_request.json"
+OFFBOARDING_STATE_PATH = DB_PATH + ".offboarding.json"
 
 # ========== 日志文件 ==========
 LOG_PATH = "bot.log"
