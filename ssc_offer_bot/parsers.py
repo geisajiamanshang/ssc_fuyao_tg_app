@@ -104,7 +104,13 @@ def get_field(fields: dict, *keys, default: str = "") -> str:
 def strip_header_footer(text: str) -> str:
     """删除原始或重复的Offer标题，以及末尾的审批请求。"""
     t = (text or "").strip()
-    header = r"^(?:【\s*offer\s*】\s*\+?\s*附件简历\s*[:：]?|[^\n【]*【\s*offer\s*信息确认\s*】)\s*"
+    header = (
+        r"^(?:"
+        r"(?:【\s*offer\s*】|offer)\s*\+?\s*附件简历\s*[:：]?"      # Offer+附件简历： / 【Offer】+附件简历：
+        r"|【\s*offer\s*申请\s*】\s*[:：]?"                          # 【Offer申请】
+        r"|[^\n【]*【\s*offer\s*信息确认\s*】"                       # xx中心【offer信息确认】
+        r")\s*"
+    )
     while True:
         cleaned = re.sub(header, "", t, count=1, flags=re.I)
         if cleaned == t:

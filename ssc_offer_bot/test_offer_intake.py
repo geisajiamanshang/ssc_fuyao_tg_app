@@ -10,6 +10,31 @@ from parsers import (mentions_ssc, is_offer_message, parse_kv_fields,
                      get_field, offer_header_org, strip_header_footer)
 
 
+class StripHeaderFooterTests(TestCase):
+    def test_strips_bare_offer_plus_resume_line(self):
+        # BP转发时常见把"技术中心【offer信息确认】"和"Offer+附件简历："分成
+        # 两行，后者以前没有【】括号包裹，不会被旧正则识别，会原样残留在
+        # 转发到联合管理群的消息里。
+        text = "技术中心【offer信息确认】\nOffer+附件简历：\n候选人编码：WTQA00027\n候选人姓名：muli"
+        self.assertEqual(strip_header_footer(text), "候选人编码：WTQA00027\n候选人姓名：muli")
+
+    def test_strips_bracketed_offer_plus_resume_line(self):
+        text = "【Offer】+附件简历：\n候选人编码：A1\n候选人姓名：小仙"
+        self.assertEqual(strip_header_footer(text), "候选人编码：A1\n候选人姓名：小仙")
+
+    def test_strips_offer_application_bracket_header(self):
+        text = "【Offer申请】\n候选人编码：A1\n候选人姓名：小仙"
+        self.assertEqual(strip_header_footer(text), "候选人编码：A1\n候选人姓名：小仙")
+
+    def test_strips_offer_application_bracket_header_with_space(self):
+        text = "【Offer 申请】\n候选人编码：A1\n候选人姓名：小仙"
+        self.assertEqual(strip_header_footer(text), "候选人编码：A1\n候选人姓名：小仙")
+
+    def test_body_without_any_header_is_unchanged(self):
+        text = "候选人编码：A1\n候选人姓名：小仙"
+        self.assertEqual(strip_header_footer(text), text)
+
+
 class MentionTests(TestCase):
     def test_missing_flag_still_accepts_exact_username(self):
         for text in ['@ffuuyao 请审批', '@FFUUYAO', '请@ffuuyao审批']:
