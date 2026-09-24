@@ -1515,30 +1515,62 @@ def matches_recruit_candidate(text: str, candidate_name: str, candidate_code: st
                 and normalized(candidate_name) == normalized(resume_name))
 
 
+def _normalized_name(value):
+    return "".join(c for c in unicodedata.normalize("NFKC", value or "").casefold()
+                   if not c.isspace() and unicodedata.category(c) != 'Cf')
+
+
+def matches_recruit_candidate_by_name(text: str, candidate_name: str) -> bool:
+    """招聘群里找不到带候选人编码的正式简历消息时的退而求其次匹配：只要有
+    "候选人姓名"（或"姓名"）字段且和候选人姓名一致，就当作能定位到人的线索
+    消息，比如HR发的面试邀约、Zoom会议链接等——这类消息通常不含候选人编码，
+    但足够回复+@招聘，让招聘私聊补充完整的招聘/入职信息。"""
+    fields = parse_kv_fields(text)
+    resume_name = get_field(fields, "候选人姓名", "姓名")
+    return bool(_normalized_name(candidate_name) and resume_name
+                and _normalized_name(candidate_name) == _normalized_name(resume_name))
+
+
 async def handle_final_approved(candidate_name: str, rec: dict):
-    """终审通过后：去招聘群搜同名候选人的简历消息，回复它。"""
+    """终审通过后：去招聘群搜同名候选人的简历消息，回复它；找不到带编码的
+    正式简历时，退而求其次找一条提到候选人姓名的其他消息（面试邀约、Zoom
+    会议通知等），一样回复+@招聘，让招聘私聊补充完整信息。"""
     resume_msg = None
+    fallback_msg = None
     candidate_code = get_field(rec.get("raw_fields", {}), "候选人编码")
     # 搜索索引未命中时分页遍历历史，避免格式差异和旧简历超出固定条数上限。
     searches = list(dict.fromkeys(value for value in (candidate_code, candidate_name) if value)) + [None]
     for search in searches:
         kwargs = {"search": search, "limit": None} if search else {"limit": None}
         async for m in client.iter_messages(config.GROUP_RECRUIT, **kwargs):
-            if matches_recruit_candidate(m.raw_text or "", candidate_name, candidate_code):
+            text = m.raw_text or ""
+            if matches_recruit_candidate(text, candidate_name, candidate_code):
                 resume_msg = m
                 break
+            if fallback_msg is None and matches_recruit_candidate_by_name(text, candidate_name):
+                fallback_msg = m
         if resume_msg:
             break
+
+    used_fallback = not resume_msg and fallback_msg is not None
+    resume_msg = resume_msg or fallback_msg
 
     if not resume_msg:
         log.warning(f"[场景2] 终审通过，但在招聘群未找到候选人「{candidate_name}」的简历消息，需要人工处理")
         state.update(candidate_name, stage="final_approved_no_resume_found")
         reviewer = await get_ssc_reviewer()
         await client.send_message(reviewer.id,
-            candidate_name + "-终审已通过，但未找到编码和姓名匹配的简历。"
+            candidate_name + "-终审已通过，但未找到编码和姓名匹配的简历，也没有找到提到该姓名的其他消息。"
             + f"查询招聘群ID：{config.GROUP_RECRUIT}；候选人编码：{candidate_code or '未填写'}。"
             + "请核对群ID及简历字段；修正后在收藏夹发送“重试招聘通知”。", parse_mode=None)
         return
+
+    if used_fallback:
+        log.warning(f"[场景2] 候选人「{candidate_name}」未找到正式简历，改用招聘群里提到该姓名的其他消息(msg_id={resume_msg.id})继续流程")
+        reviewer = await get_ssc_reviewer()
+        await client.send_message(reviewer.id,
+            candidate_name + f"-未找到带编码的正式简历，已改用招聘群里msg_id={resume_msg.id}这条提到该姓名的消息"
+            + "（如面试邀约/会议通知）继续流程，请核实简历信息是否需要人工补充。", parse_mode=None)
 
     recruiter = await resume_msg.get_sender()
     recruiter_username = recruiter.username or str(recruiter.id)
