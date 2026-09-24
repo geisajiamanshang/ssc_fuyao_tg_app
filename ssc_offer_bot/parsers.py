@@ -116,7 +116,7 @@ def strip_header_footer(text: str) -> str:
         if cleaned == t:
             break
         t = cleaned.strip()
-    footer = r"(?:^|\n)[ \t]*(?:@ffuuyao\b[^\n]*|@[A-Za-z0-9_]+[^\n]*?(?:请\s*(?:领导\s*)?审批|麻烦\s*跟进\s*offer\s*审批)[^\n]*)\s*$"
+    footer = r"(?:^|\n)[ \t]*(?:@ffuuyao\b[^\n]*|@[A-Za-z0-9_]+[^\n]*?(?:请\s*(?:领导\s*)?审批|麻烦\s*跟进\s*offer(?:\s*审批)?)[^\n]*)\s*$"
     while True:
         cleaned = re.sub(footer, "", t, count=1, flags=re.I)
         if cleaned == t:
