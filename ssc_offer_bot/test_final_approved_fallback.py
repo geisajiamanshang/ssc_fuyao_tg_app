@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """终审通过后，招聘群里如果找不到带候选人编码的正式简历，退而求其次找一条
 提到候选人姓名的其他消息（面试邀约、Zoom会议通知等），继续走后续流程，
-而不是直接放弃并要求人工处理。"""
+而不是直接放弃并要求人工处理；查到多份候选人相关消息时，优先选发送人
+和提交Offer的BP不是同一个TG账号的那条。"""
 
 import ast
 import unittest
@@ -16,7 +17,7 @@ source = Path(__file__).with_name('main.py').read_text()
 tree = ast.parse(source)
 selected = {
     'matches_recruit_candidate', 'matches_recruit_candidate_by_name',
-    '_normalized_name', 'handle_final_approved',
+    '_normalized_name', 'handle_final_approved', '_pick_preferred_recruit_message',
 }
 config = NS(GROUP_RECRUIT=-456)
 ns = dict(
@@ -84,6 +85,50 @@ class FinalApprovedFallbackTests(unittest.IsolatedAsyncioTestCase):
         notice = ns['client'].send_message.call_args.args[1]
         self.assertIn('shun', notice)
         self.assertIn('80', notice)
+
+    async def test_prefers_resume_not_sent_by_bp_when_multiple_match(self):
+        bp_copy = NS(id=71, raw_text='候选人编码：A1\n候选人姓名：shun',
+                    get_sender=AsyncMock(return_value=NS(id=5, username='bp_lin')))
+        recruiter_copy = NS(id=72, raw_text='候选人编码：A1\n候选人姓名：shun',
+                    get_sender=AsyncMock(return_value=NS(id=8, username='recruiter')))
+        # 消息顺序模拟Telegram默认新到旧：BP自己转发的那份反而更靠前。
+        ns['client'].iter_messages = messages(bp_copy, recruiter_copy)
+        rec = {'raw_fields': {'候选人编码': 'A1'}, 'hrbp_username': 'bp_lin'}
+        await ns['handle_final_approved']('shun', rec)
+        call = ns['queue_group_message'].call_args
+        self.assertEqual(call.kwargs['reply_to'], 72)
+        self.assertEqual(call.kwargs['updates']['recruiter_username'], 'recruiter')
+
+    async def test_prefers_non_bp_fallback_message_when_multiple_match(self):
+        bp_zoom_copy = NS(id=81, raw_text='候选人姓名：shun\n面试方式：Zoom',
+                    get_sender=AsyncMock(return_value=NS(id=5, username='bp_lin')))
+        hr_zoom_copy = NS(id=82, raw_text='候选人姓名：shun\n面试方式：Zoom',
+                    get_sender=AsyncMock(return_value=NS(id=9, username='hr_weien')))
+        ns['client'].iter_messages = messages(bp_zoom_copy, hr_zoom_copy)
+        rec = {'raw_fields': {'候选人编码': 'A1'}, 'hrbp_username': '@bp_lin'}
+        await ns['handle_final_approved']('shun', rec)
+        call = ns['queue_group_message'].call_args
+        self.assertEqual(call.kwargs['reply_to'], 82)
+        self.assertEqual(call.kwargs['updates']['recruiter_username'], 'hr_weien')
+
+    async def test_falls_back_to_first_match_when_all_from_bp(self):
+        bp_copy1 = NS(id=71, raw_text='候选人编码：A1\n候选人姓名：shun',
+                    get_sender=AsyncMock(return_value=NS(id=5, username='bp_lin')))
+        bp_copy2 = NS(id=73, raw_text='候选人编码：A1\n候选人姓名：shun',
+                    get_sender=AsyncMock(return_value=NS(id=5, username='bp_lin')))
+        ns['client'].iter_messages = messages(bp_copy1, bp_copy2)
+        rec = {'raw_fields': {'候选人编码': 'A1'}, 'hrbp_username': 'bp_lin'}
+        await ns['handle_final_approved']('shun', rec)
+        call = ns['queue_group_message'].call_args
+        self.assertEqual(call.kwargs['reply_to'], 71)
+
+    async def test_no_hrbp_username_on_record_just_takes_first_match(self):
+        resume = NS(id=70, raw_text='候选人编码：A1\n候选人姓名：shun',
+                    get_sender=AsyncMock(return_value=NS(id=8, username='recruiter')))
+        ns['client'].iter_messages = messages(resume)
+        rec = {'raw_fields': {'候选人编码': 'A1'}}
+        await ns['handle_final_approved']('shun', rec)
+        self.assertEqual(ns['queue_group_message'].call_args.kwargs['reply_to'], 70)
 
     async def test_no_match_at_all_still_reports_for_manual_handling(self):
         unrelated = NS(id=90, raw_text='候选人姓名：小明\n入职部门：技术中心',

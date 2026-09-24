@@ -33,9 +33,10 @@ class LateReviewTests(IsolatedAsyncioTestCase):
         ns['approval_target'] = AsyncMock(return_value=('小B',rec))
         ns['recover_approval_evidence'] = AsyncMock()
         ns['build_recruit_reply_message'] = build_recruit_reply_message
-        fn = next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
-                  and n.name == 'handle_final_approved')
-        exec(compile(ast.Module(body=[fn],type_ignores=[]),'<flow>','exec'),ns)
+        needed = {'handle_final_approved', '_pick_preferred_recruit_message',
+                  'matches_recruit_candidate_by_name'}
+        nodes = [n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name in needed]
+        exec(compile(ast.Module(body=nodes,type_ignores=[]),'<flow>','exec'),ns)
         resume = NS(id=70,raw_text='候选人编码：B1\n候选人姓名：小B',
                     get_sender=AsyncMock(return_value=NS(id=8,username='recruiter')))
         async def history(*a,**kw):

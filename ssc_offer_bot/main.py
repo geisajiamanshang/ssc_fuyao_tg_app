@@ -1531,13 +1531,32 @@ def matches_recruit_candidate_by_name(text: str, candidate_name: str) -> bool:
                 and _normalized_name(candidate_name) == _normalized_name(resume_name))
 
 
+async def _pick_preferred_recruit_message(candidates, hrbp_username):
+    """查到多份候选人相关消息时，优先选发送人TG用户名和提交Offer的BP不同的
+    那条——真正来自招聘/HR的简历或Zoom面试通知，而不是BP自己转发/复制到
+    招聘群里的那份；分不清楚（没有BP用户名、或都一样/都不一样）就按原有
+    顺序（消息越新越靠前）取第一条，不额外猜测。"""
+    if not candidates:
+        return None
+    if not hrbp_username:
+        return candidates[0]
+    for m in candidates:
+        sender = await m.get_sender()
+        sender_username = (getattr(sender, "username", "") or "").casefold()
+        if sender_username and sender_username != hrbp_username:
+            return m
+    return candidates[0]
+
+
 async def handle_final_approved(candidate_name: str, rec: dict):
     """终审通过后：去招聘群搜同名候选人的简历消息，回复它；找不到带编码的
     正式简历时，退而求其次找一条提到候选人姓名的其他消息（面试邀约、Zoom
-    会议通知等），一样回复+@招聘，让招聘私聊补充完整信息。"""
-    resume_msg = None
-    fallback_msg = None
+    会议通知等），一样回复+@招聘，让招聘私聊补充完整信息。查到多份候选人
+    相关消息时，优先选发送人不是BP本人的那条。"""
+    resume_candidates = []
+    fallback_candidates = []
     candidate_code = get_field(rec.get("raw_fields", {}), "候选人编码")
+    hrbp_username = (rec.get("hrbp_username") or "").strip().lstrip("@").casefold()
     # 搜索索引未命中时分页遍历历史，避免格式差异和旧简历超出固定条数上限。
     searches = list(dict.fromkeys(value for value in (candidate_code, candidate_name) if value)) + [None]
     for search in searches:
@@ -1545,15 +1564,16 @@ async def handle_final_approved(candidate_name: str, rec: dict):
         async for m in client.iter_messages(config.GROUP_RECRUIT, **kwargs):
             text = m.raw_text or ""
             if matches_recruit_candidate(text, candidate_name, candidate_code):
-                resume_msg = m
-                break
-            if fallback_msg is None and matches_recruit_candidate_by_name(text, candidate_name):
-                fallback_msg = m
-        if resume_msg:
+                resume_candidates.append(m)
+            elif matches_recruit_candidate_by_name(text, candidate_name):
+                fallback_candidates.append(m)
+        if resume_candidates or fallback_candidates:
             break
 
-    used_fallback = not resume_msg and fallback_msg is not None
-    resume_msg = resume_msg or fallback_msg
+    resume_msg = await _pick_preferred_recruit_message(resume_candidates, hrbp_username)
+    used_fallback = resume_msg is None
+    if used_fallback:
+        resume_msg = await _pick_preferred_recruit_message(fallback_candidates, hrbp_username)
 
     if not resume_msg:
         log.warning(f"[场景2] 终审通过，但在招聘群未找到候选人「{candidate_name}」的简历消息，需要人工处理")
