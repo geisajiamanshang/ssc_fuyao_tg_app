@@ -7,11 +7,11 @@ SSC Offer 审批流转自动化 主程序。
           -> 改写格式 -> 转发到联合管理工作群，@一级领导
 
   场景二：联合管理工作群里
-          一级领导回复"好的"
+          一级领导回复"好的"（或在@他的消息上点👌表情，效果相同）
             -> 技术中心：@二级审批人；其他中心：直接 @终审人
-          （技术中心）二级审批人任意回复
+          （技术中心）二级审批人任意回复（或点👌表情）
             -> @终审人
-          终审人任意回复
+          终审人任意回复（或点👌表情）
             -> 去招聘群搜同名候选人的简历消息，回复它，@招聘 + @hrbp，
                并提示"请招聘私聊我"补充招聘/入职信息
 
@@ -56,9 +56,12 @@ import logging
 import unicodedata
 import re
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, utils
+from telethon.tl.types import UpdateMessageReactions, ReactionEmoji
+from telethon.tl.functions.messages import GetMessageReactionsListRequest
 
 import config
 from state_store import StateStore
@@ -1235,6 +1238,89 @@ async def process_leadership_reply(event):
             log.exception("[Offer审批] 候选人=%s 处理失败；继续检查其他候选人", name)
             reviewer = await get_ssc_reviewer()
             await client.send_message(reviewer.id, name + "-审批处理异常，请检查日志", parse_mode=None)
+
+async def _offer_record_for_message(message):
+    """判断某条消息是否是可关联的Offer审批锚点消息（原始Offer信息确认，或
+    二级/终审的@领导审批提示），返回(name, rec)；供表情回应(reaction)直接按
+    被回应的消息判断复用，逻辑与approval_target里单条消息的匹配规则一致。"""
+    me = await client.get_me()
+    if not message or message.sender_id != me.id:
+        return None, None
+    for field in ("offer_confirm_msg_id", "second_review_msg_id", "final_review_msg_id"):
+        name, rec = state.find_by_field(field, message.id)
+        if rec:
+            org = rec.get("org_unit")
+            if field == "offer_confirm_msg_id":
+                org = get_field(parse_kv_fields(message.raw_text or ""), "入职编制组织", "编制组织") or org
+            return (name, dict(rec, org_unit=org)) if org else (None, None)
+    compact = "".join((message.raw_text or "").casefold().split())
+    if "offer信息确认" in compact:
+        name, rec = state.find_by_field("offer_confirm_msg_id", message.id)
+        if not rec:
+            return None, None
+        fields = parse_kv_fields(message.raw_text or "")
+        org = get_field(fields, "入职编制组织", "编制组织") or rec.get("org_unit")
+        return (name, dict(rec, org_unit=org)) if org else (None, None)
+    return None, None
+
+
+async def _find_approval_reactor(peer_id, msg_id):
+    """按APPROVAL_REACTION_EMOJIS逐个查该消息的表情回应者列表（用API精确查询，
+    不依赖UpdateMessageReactions里可能被截断的recent_reactions），在其中找第一个
+    用户名能对上一级/二级/终审领导的人；无关成员点的表情（哪怕同一条消息上
+    也有别人点了不相关表情）不会被误判。"""
+    leader_usernames = {role_username(r) for r in ("first", "second", "final")}
+    for emoji in config.APPROVAL_REACTION_EMOJIS:
+        result = await client(GetMessageReactionsListRequest(
+            peer=peer_id, id=msg_id, reaction=ReactionEmoji(emoticon=emoji), limit=100,
+        ))
+        users_by_id = {user.id: user for user in result.users}
+        for item in result.reactions:
+            user = users_by_id.get(getattr(item.peer_id, "user_id", None))
+            if user is not None and (getattr(user, "username", "") or "").casefold() in leader_usernames:
+                return user
+    return None
+
+
+@client.on(events.Raw(UpdateMessageReactions))
+async def on_leadership_reaction(update):
+    if utils.get_peer_id(update.peer) != config.GROUP_LEADERSHIP:
+        return
+    async with approval_lock:
+        await process_leadership_reaction(update)
+
+
+async def process_leadership_reaction(update):
+    """领导在@他的审批提示消息上直接点表情（如👌），等价于回复审批通过。"""
+    peer_id = utils.get_peer_id(update.peer)
+    if peer_id in config.EXCLUDED_CHAT_IDS:
+        return
+    message = await client.get_messages(peer_id, ids=update.msg_id)
+    name, rec = await _offer_record_for_message(message)
+    if not rec:
+        return
+    reactor = await _find_approval_reactor(peer_id, update.msg_id)
+    if not reactor:
+        return
+    sender = SimpleNamespace(username=reactor.username, id=reactor.id)
+    try:
+        rec["approvals"] = dict(state.get(name).get("approvals", {}))
+        role = approval_role(sender, rec, update.msg_id)
+        if not role:
+            return
+        missing, changed = apply_approval_evidence(rec, role, update.msg_id, reactor.id)
+        if changed:
+            state.update(name, approvals=rec["approvals"], last_approval_msg_id=update.msg_id)
+        if missing:
+            await notify_missing(name, missing)
+            return
+        state.update(name, approvals=rec["approvals"], last_approval_msg_id=update.msg_id)
+        await advance_offer(name, rec)
+    except Exception:
+        log.exception("[Offer审批] 候选人=%s 表情回应处理失败；继续检查其他候选人", name)
+        reviewer = await get_ssc_reviewer()
+        await client.send_message(reviewer.id, name + "-审批处理异常，请检查日志", parse_mode=None)
+
 
 async def process_batch_final(event):
     """终审当天Offer；所有业务通知仍先进入收藏夹。"""
