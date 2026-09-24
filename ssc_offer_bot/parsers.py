@@ -88,6 +88,31 @@ def parse_kv_fields(text: str) -> dict:
     return fields
 
 
+_DATE_LIKE_RE = re.compile(
+    r"^\d{4}\s*[.\-/年]\s*\d{1,2}\s*[.\-/月]\s*\d{1,2}\s*日?$"   # 2026.10.08 / 2026-10-08 / 2026年10月08日
+    r"|^\d{1,2}\s*[./]\s*\d{1,2}$"                                     # 9/16 / 10.08
+)
+_CONTACT_LIKE_RE = re.compile(
+    r"^@[A-Za-z0-9_]{3,}$"     # @dashit88
+    r"|^1\d{10}$"              # 手机号
+)
+
+
+def fix_swapped_onboarding_date_contact(fields: dict) -> dict:
+    """招聘私聊补充"入职信息"时，偶尔会把"入职日期"和"候选人联系方式"两行的
+    值填反（比如"入职日期：@dashit88" + "候选人联系方式：2026.10.08"）。
+    只有一边明显是TG号/手机号、另一边明显是日期格式时才纠正，模糊或非常规
+    格式一律不动，避免误伤正常但格式少见的填写。"""
+    date_val = (fields.get("入职日期") or "").strip()
+    contact_val = (fields.get("候选人联系方式") or "").strip()
+    if (date_val and contact_val
+            and _CONTACT_LIKE_RE.match(date_val) and not _DATE_LIKE_RE.match(date_val)
+            and _DATE_LIKE_RE.match(contact_val) and not _CONTACT_LIKE_RE.match(contact_val)):
+        fields = dict(fields)
+        fields["入职日期"], fields["候选人联系方式"] = contact_val, date_val
+    return fields
+
+
 def get_field(fields: dict, *keys, default: str = "") -> str:
     """
     按多个可能的字段名依次查找，返回第一个命中的值。
