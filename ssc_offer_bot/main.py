@@ -76,7 +76,7 @@ import config
 from state_store import StateStore
 from approval_queue import select_pending
 from batch_approval import missing_approvals, recover_approvals
-from parsers import parse_kv_fields, get_field, strip_header_footer
+from parsers import parse_kv_fields, get_field, strip_header_footer, fix_swapped_onboarding_date_contact
 from parsers import is_offer_message, offer_header_org, is_approval, mentions_ssc
 from templates import (
     build_offer_confirm_message,
@@ -1683,6 +1683,7 @@ async def on_private_message(event):
     # 输出模板中简历来源填推荐人，招聘通道填资源来源；私聊明确字段优先。
     merged_fields["简历来源"] = dm_fields.get("简历来源") or get_field(resume_fields, "简历推荐人") or merged_fields.get("简历来源", "")
     merged_fields["招聘通道"] = dm_fields.get("招聘通道") or get_field(resume_fields, "招聘通道", "简历来源") or merged_fields.get("招聘通道", "")
+    merged_fields = fix_swapped_onboarding_date_contact(merged_fields)
 
     # 老记录从群内取回原Offer，新记录直接使用发送时保存的正文。
     offer_text = rec.get("offer_confirm_text", "")

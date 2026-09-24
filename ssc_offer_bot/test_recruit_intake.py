@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import test_flow as flow
 from state_store import StateStore
 from templates import build_onboarding_confirm_message
+from parsers import fix_swapped_onboarding_date_contact
 
 
 class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
@@ -19,6 +20,7 @@ class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
         exec(compile(ast.Module(body=nodes,type_ignores=[]),'<intake>','exec'),self.ns)
         self.ns['log'].info = lambda *a: None
         self.ns['build_onboarding_confirm_message'] = build_onboarding_confirm_message
+        self.ns['fix_swapped_onboarding_date_contact'] = fix_swapped_onboarding_date_contact
         self.ns['get_leader_tags'] = lambda *a: ['leader']
         self.store = StateStore.__new__(StateStore)
         self.rec = dict(stage='waiting_recruiter_dm',recruiter_id=8,org_unit='效能中心',
@@ -42,6 +44,16 @@ class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs['expected_stage'],'waiting_ssc_onboarding')
         self.assertEqual(call.kwargs['reply_to'],10)
         self.ns['client'].send_message.assert_not_awaited()
+
+    async def test_swapped_date_and_contact_in_dm_are_corrected(self):
+        text = ('3️⃣招聘信息\n招聘渠道：万天招聘部\n简历来源：齐夏\n招聘通道：个人资源\n'
+                '4️⃣入职信息\n候选人姓名：小C\n入职日期：@dashit88\n候选人联系方式：2026.10.08')
+        event = NS(is_private=True, raw_text=text, message=NS(id=91),
+                   get_sender=AsyncMock(return_value=NS(id=8, username='recruiter')))
+        await self.ns['on_private_message'](event)
+        call = self.ns['queue_group_message'].call_args
+        self.assertIn('入职日期：2026.10.08', call.args[1])
+        self.assertIn('候选人联系方式：@dashit88', call.args[1])
 
     async def test_early_verified_dm_saved_then_replayed(self):
         self.rec['stage'] = 'waiting_ssc_recruit_reply'

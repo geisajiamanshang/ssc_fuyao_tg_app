@@ -7,7 +7,8 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock
 
 from parsers import (mentions_ssc, is_offer_message, parse_kv_fields,
-                     get_field, offer_header_org, strip_header_footer)
+                     get_field, offer_header_org, strip_header_footer,
+                     fix_swapped_onboarding_date_contact)
 
 
 class StripHeaderFooterTests(TestCase):
@@ -43,6 +44,28 @@ class StripHeaderFooterTests(TestCase):
     def test_still_strips_bp_footer_with_shenpi_suffix(self):
         text = "候选人编码：A1\n候选人姓名：小仙\n\n@oiyr90557 麻烦跟进offer审批"
         self.assertEqual(strip_header_footer(text), "候选人编码：A1\n候选人姓名：小仙")
+
+
+class SwappedDateContactTests(TestCase):
+    def test_swaps_when_date_and_contact_are_reversed(self):
+        fields = {"入职日期": "@dashit88", "候选人联系方式": "2026.10.08"}
+        fixed = fix_swapped_onboarding_date_contact(fields)
+        self.assertEqual(fixed["入职日期"], "2026.10.08")
+        self.assertEqual(fixed["候选人联系方式"], "@dashit88")
+
+    def test_leaves_correct_order_unchanged(self):
+        fields = {"入职日期": "2026.10.08", "候选人联系方式": "@dashit88"}
+        self.assertEqual(fix_swapped_onboarding_date_contact(fields), fields)
+
+    def test_leaves_ambiguous_values_unchanged(self):
+        # 手机号不算"日期样式"也不算"@开头"，格式拿不准时不瞎改。
+        fields = {"入职日期": "9/16", "候选人联系方式": "13800001111"}
+        self.assertEqual(fix_swapped_onboarding_date_contact(fields), fields)
+
+    def test_missing_fields_are_left_alone(self):
+        self.assertEqual(fix_swapped_onboarding_date_contact({}), {})
+        self.assertEqual(fix_swapped_onboarding_date_contact({"入职日期": "2026.10.08"}),
+                          {"入职日期": "2026.10.08"})
 
 
 class MentionTests(TestCase):
