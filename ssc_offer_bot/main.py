@@ -60,6 +60,8 @@ SSC Offer 审批流转自动化 主程序。
 """
 
 import asyncio
+import os
+from attendance_reply import AttendanceReplies
 import logging
 import random
 import unicodedata
@@ -2051,6 +2053,11 @@ async def main():
             f"登录账号ID {me.id} 与配置SSC账号ID {config.EXPECTED_SSC_USER_ID} 不一致"
         )
     await get_ssc_reviewer()
+    attendance = None
+    if os.environ.get('ATTENDANCE_AUTO_REPLY_ENABLED', '1') == '1':
+        attendance = AttendanceReplies(client, StateStore(config.DB_PATH + '.attendance.json'))
+        client.add_event_handler(attendance.receive, events.NewMessage(incoming=True))
+        attendance.resume()
     daily_report_task = None
     if config.DAILY_REPORT_ENABLED:
         daily_report_sender = DailyReportSender(
@@ -2067,6 +2074,8 @@ async def main():
     try:
         await client.run_until_disconnected()
     finally:
+        if attendance:
+            await attendance.close()
         if daily_report_task:
             daily_report_task.cancel()
             await asyncio.gather(daily_report_task, return_exceptions=True)
