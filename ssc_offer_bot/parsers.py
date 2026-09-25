@@ -60,8 +60,8 @@ def is_approval(text: str) -> bool:
     suffix = r"(?:[,，。!！、]*(?:了|的|啦|可以继续|请继续|继续下一步|请推进|可以推进|谢谢))*"
     return bool(re.fullmatch(prefix + token + r"(?:[,，。!！、]*" + token + r")*" + suffix, value))
 
-# 字段名允许中文/英文/数字/下划线/斜杠，长度限制避免误把正文长句当成字段名
-_FIELD_PATTERN = re.compile(r"^\s*(?:[0-9０-９]+\s*[.．、)）]\s*)?([\u4e00-\u9fa5A-Za-z0-9_/]{1,20}?)\s*[:：]\s*(.+?)\s*$")
+# 字段名允许中文/英文/数字/下划线/斜杠/短横线（如"部门-小组"），长度限制避免误把正文长句当成字段名
+_FIELD_PATTERN = re.compile(r"^\s*(?:[0-9０-９]+\s*[.．、)）]\s*)?([\u4e00-\u9fa5A-Za-z0-9_/-]{1,20}?)\s*[:：]\s*(.+?)\s*$")
 
 
 def parse_kv_fields(text: str) -> dict:

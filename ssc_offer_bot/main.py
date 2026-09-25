@@ -51,12 +51,20 @@ SSC Offer 审批流转自动化 主程序。
           -> 发到收藏夹，SSC发送审批码（测试5/5）后按关键词是否含"外事"
              放行到对应的外事/工作帐号需求群
 
+  场景九：SSC在自己的收藏夹发送"当日人事信息数据同步"触发码（测试9/9）
+          -> 汇总"人事数据同步-SSC3组"里当天本账号发出的【入职信息同步】
+             【转正信息同步】【离职信息同步】【人员异动信息同步】，按运营/
+             技术/渠道/商务/效能五个中心分类计数，生成详细版/无详情版各
+             一条草稿回发收藏夹
+          -> SSC发送测试91/91放行无详情版回人事数据同步-SSC3组；发送
+             测试92/92放行详细版到联合管理群
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5”，
-     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92”，
+     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92”。
 """
 
 import asyncio
@@ -122,6 +130,11 @@ from offboarding import (
     extract_offboarding_name,
     matches_offboarding_keyword,
 )
+from daily_sync import (
+    build_daily_sync_report,
+    classify_and_bucket,
+    new_center_bucket,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -164,6 +177,7 @@ offboarding_events = StateStore(config.OFFBOARDING_STATE_PATH)
 offboarding_lock = asyncio.Lock()
 offboarding_drive = OffboardingDriveRepository(config.OFFBOARDING_OUTPUT_FOLDER_ID)
 offboarding_process_drive = OffboardingApprovalFormRepository(config.OFFBOARDING_PROCESS_FOLDER_ID)
+daily_sync_lock = asyncio.Lock()
 
 
 async def forward_onboarding_to_hrgs(message, chat_id):
@@ -449,6 +463,96 @@ async def on_ssc_send_approval(event):
                         log.exception("[SSC审批] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
         except Exception:
             log.exception("[SSC审批] 发送或保存失败，草稿msg_id=%s；结果待核查，不自动重发", item["draft_id"])
+
+
+async def collect_daily_sync_entries(reviewer_id):
+    """收集"人事数据同步-SSC3组"里当天本账号（reviewer_id）发出的
+    【入职信息同步】【转正信息同步】【离职信息同步】【人员异动信息同步】，
+    按所属中心归类计数。iter_messages 默认从新到旧，遇到非当天的消息即可
+    停止扫描，不必翻遍整个群历史。
+    """
+    tz = ZoneInfo(config.DAILY_REPORT_TIMEZONE)
+    today = datetime.now(tz).date()
+    buckets = {center: new_center_bucket() for center in config.DAILY_SYNC_CENTER_ORDER}
+    async for message in client.iter_messages(config.GROUP_REGULARIZATION_SYNC, from_user=reviewer_id):
+        sent_date = message.date.astimezone(tz).date()
+        if sent_date < today:
+            break
+        if sent_date > today:
+            continue
+        classify_and_bucket(
+            message.raw_text or "", buckets,
+            config.DAILY_SYNC_CENTER_DEPARTMENT_KEYWORDS, config.DAILY_SYNC_CENTER_ORDER,
+        )
+    return buckets
+
+
+@client.on(events.NewMessage())
+async def on_ssc_daily_sync_trigger(event):
+    """SSC在自己的收藏夹发DAILY_SYNC_TRIGGER_CODE（测试9/9），触发汇总当天
+    "人事数据同步-SSC3组"里的入职/转正/离职/异动同步数据，生成详细版和
+    无详情版两条草稿回收藏夹：DAILY_SYNC_DETAIL_APPROVAL_CODE（92）放行详细
+    版到联合管理群，DAILY_SYNC_SUMMARY_APPROVAL_CODE（91）放行无详情版回
+    人事数据同步-SSC3组。这是发起一次新的生成，不是释放某条已排队的草稿，
+    所以不走APPROVAL_CODES/select_pending那一套，用独立的监听器识别。
+    """
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    if text != config.DAILY_SYNC_TRIGGER_CODE:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.DAILY_SYNC_ENABLED:
+        await client.send_message(
+            reviewer.id, "当日人事信息数据同步未启用：GROUP_REGULARIZATION_SYNC 未配置。",
+            parse_mode=None,
+        )
+        return
+    async with daily_sync_lock:
+        try:
+            date_str = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date().isoformat()
+            buckets = await collect_daily_sync_entries(reviewer.id)
+            detail_text = build_daily_sync_report(
+                buckets, config.DAILY_SYNC_CENTER_ORDER, config.DAILY_SYNC_COMPANY_LABEL,
+                date_str, include_detail=True,
+            )
+            summary_text = build_daily_sync_report(
+                buckets, config.DAILY_SYNC_CENTER_ORDER, config.DAILY_SYNC_COMPANY_LABEL,
+                date_str, include_detail=False,
+            )
+        except Exception:
+            log.exception("[当日人事信息数据同步] 生成失败，msg_id=%s", event.message.id)
+            await client.send_message(
+                reviewer.id, "当日人事信息数据同步生成失败，请查看机器人日志。",
+                parse_mode=None,
+            )
+            return
+
+        trigger_key = f"{event.chat_id}:{event.message.id}"
+        await queue_group_message(
+            config.GROUP_LEADERSHIP, detail_text,
+            candidate=f"daily_sync_detail:{trigger_key}",
+            expected_stage="waiting_ssc_daily_sync_detail",
+            updates={"stage": "daily_sync_detail_sent"},
+            kind="daily_sync_detail",
+            approval_code=config.DAILY_SYNC_DETAIL_APPROVAL_CODE,
+            delete_draft_after_send=True,
+        )
+        await queue_group_message(
+            config.GROUP_REGULARIZATION_SYNC, summary_text,
+            candidate=f"daily_sync_summary:{trigger_key}",
+            expected_stage="waiting_ssc_daily_sync_summary",
+            updates={"stage": "daily_sync_summary_sent"},
+            kind="daily_sync_summary",
+            approval_code=config.DAILY_SYNC_SUMMARY_APPROVAL_CODE,
+            delete_draft_after_send=True,
+        )
+        log.info(
+            "[当日人事信息数据同步] 已生成详细版/无详情版草稿，等待SSC发送%s/%s放行",
+            config.DAILY_SYNC_DETAIL_APPROVAL_CODE, config.DAILY_SYNC_SUMMARY_APPROVAL_CODE,
+        )
 
 
 async def _send_saved_text(reviewer_id, text):
@@ -861,7 +965,7 @@ async def on_onboarding_training_passed(event):
             if "入职信息同步" in gated_by_name and config.GROUP_REGULARIZATION_SYNC:
                 sync_draft = await queue_group_message(
                     config.GROUP_REGULARIZATION_SYNC,
-                    gated_by_name["入职信息同步"],
+                    f"【入职信息同步】\n\n{gated_by_name['入职信息同步']}",
                     candidate=f"onboarding_training_sync:{username}",
                     expected_stage="waiting_ssc_onboarding_training_sync",
                     updates={"stage": "onboarding_training_sync_sent", "username": username},
@@ -1267,8 +1371,9 @@ async def on_offboarding_trigger(event):
                 if d
             ]
             if sync_destinations:
+                sync_section_name, sync_body = by_role["sync"]
                 draft = await queue_offboarding_sync_broadcast(
-                    sync_destinations, by_role["sync"][1],
+                    sync_destinations, f"【{sync_section_name}】\n\n{sync_body}",
                     candidate=f"offboarding_sync:{event_key}",
                     expected_stage="waiting_ssc_offboarding_sync",
                     updates={"stage": "offboarding_sync_sent", "name": name},
