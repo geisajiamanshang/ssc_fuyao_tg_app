@@ -211,6 +211,10 @@ LOGIN_EMPLOYEE_CODE_SELECTOR = "#employee_code"
 LOGIN_PASSWORD_SELECTOR = "#password"
 LOGIN_SUBMIT_BUTTON_NAME = "Sign in"
 
+# 填表失败时把截图存到这里，方便直接在服务器上打开看卡在哪一步，不用再
+# 临时写诊断脚本。
+FAILURE_SCREENSHOT_PATH = "self_eval_failure.png"
+
 
 async def fill_self_eval_form(base_url, login_code, login_password, content):
     """登录人效通OneHR，把content（parse_self_eval_response的返回值）填进
@@ -224,19 +228,42 @@ async def fill_self_eval_form(base_url, login_code, login_password, content):
         browser = await pw.chromium.launch(headless=True)
         try:
             page = await browser.new_page()
-            await page.goto(f"{base_url}/login")
-            await page.fill(LOGIN_EMPLOYEE_CODE_SELECTOR, login_code)
-            await page.fill(LOGIN_PASSWORD_SELECTOR, login_password)
-            await page.get_by_role("button", name=LOGIN_SUBMIT_BUTTON_NAME, exact=True).click()
-            await page.wait_for_url(re.compile(r"/self-eval"), timeout=30000)
+            try:
+                await page.goto(f"{base_url}/login")
+                await page.fill(LOGIN_EMPLOYEE_CODE_SELECTOR, login_code)
+                await page.fill(LOGIN_PASSWORD_SELECTOR, login_password)
+                await page.get_by_role(
+                    "button", name=LOGIN_SUBMIT_BUTTON_NAME, exact=True
+                ).click()
+                # 页面是前端路由的单页应用，登录成功后地址栏会变但不一定
+                # 触发完整的浏览器"load"事件——wait_for_url默认要等到
+                # load，SPA的客户端路由跳转可能永远等不到这个事件，导致
+                # 明明登录成功了也一直超时。改成直接等"本期总结"这个表单
+                # 字段出现，不依赖load事件，更贴近"到没到能填表的页面"。
+                await page.wait_for_selector(
+                    SELF_EVAL_FIELD_SELECTORS["work_summary"], timeout=30000
+                )
 
-            for field, selector in SELF_EVAL_FIELD_SELECTORS.items():
-                await page.fill(selector, content[field])
-            for selector in SELF_EVAL_SCORE_SELECTORS:
-                await page.fill(selector, str(AGENT_SCORE_FIXED_VALUE))
+                for field, selector in SELF_EVAL_FIELD_SELECTORS.items():
+                    await page.fill(selector, content[field])
+                for selector in SELF_EVAL_SCORE_SELECTORS:
+                    await page.fill(selector, str(AGENT_SCORE_FIXED_VALUE))
 
-            # 触发失焦，让页面自身的自动保存草稿逻辑生效；全程不点"正式提交"。
-            await page.keyboard.press("Tab")
+                # 触发失焦，让页面自身的自动保存草稿逻辑生效；全程不点"正式提交"。
+                await page.keyboard.press("Tab")
+            except Exception as exc:
+                # 出错时留一张截图和当前地址，下次失败不用再临时写诊断脚本
+                # 才能看到卡在哪一步、页面长什么样。截图失败（比如页面已经
+                # 关闭）不影响原始异常继续往外抛。
+                current_url = page.url
+                try:
+                    await page.screenshot(path=FAILURE_SCREENSHOT_PATH, full_page=True)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"{exc}；失败时页面地址：{current_url}；"
+                    f"截图（如果保存成功）在 {FAILURE_SCREENSHOT_PATH}"
+                ) from exc
             await page.wait_for_timeout(2000)
         finally:
             await browser.close()
