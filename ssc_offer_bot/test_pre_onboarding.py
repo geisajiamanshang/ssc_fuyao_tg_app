@@ -34,13 +34,17 @@ def build_env(**overrides):
     source = ast.parse(Path(__file__).with_name('main.py').read_text())
     functions = [n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
                  and n.name in {'queue_group_message', 'on_ssc_send_approval',
-                                'queue_pre_onboarding_registration'}]
+                                'queue_pre_onboarding_registration',
+                                'forward_onboarding_to_pre_onboarding_queue',
+                                'on_ssc_onboarding_published'}]
     for node in functions:
         node.decorator_list = []
     env = dict(
         select_pending=select_pending, parse_kv_fields=parse_kv_fields, get_field=get_field,
         get_leader_tags=lambda *a, **kw: ['leader'],
         forward_onboarding_to_hrgs=AsyncMock(),
+        pre_onboarding_queue_forwards=MemoryStore(),
+        pre_onboarding_queue_lock=asyncio.Lock(),
         asyncio=asyncio, log=logging.getLogger('test'),
     )
     env.update(overrides)
@@ -75,7 +79,10 @@ class PreOnboardingTests(IsolatedAsyncioTestCase):
 
         async def send_message(destination, text, **kwargs):
             self.sent.append((destination, text))
-            return NS(id=300 + len(self.sent))
+            # raw_text/sender_id：真实Telethon发送成功后返回的Message对象上
+            # 都有这两个属性，forward_onboarding_to_pre_onboarding_queue需要
+            # 靠它们判断"是不是本账号发的入职确认"，这里的替身也补上。
+            return NS(id=300 + len(self.sent), raw_text=text, sender_id=self.me.id)
 
         self.send_message = send_message
         self.state = MemoryStore({'Nancy': {'stage': 'waiting_ssc_onboarding'}})
@@ -159,6 +166,39 @@ class PreOnboardingTests(IsolatedAsyncioTestCase):
         self.assertEqual({dest for dest, _ in self.sent}, {-1, 9})
         pre_items = [r for r in self.outbox.data.values() if r['kind'] == 'pre_onboarding']
         self.assertEqual(pre_items[0]['status'], 'pending')
+
+    async def test_manually_sent_onboarding_confirm_still_enqueues_draft(self):
+        # 真实事故：SSC没走场景三的审批流程，直接手动把入职确认贴到联合
+        # 管理群——这种消息不会经过on_ssc_send_approval，只会触发
+        # on_ssc_onboarding_published这个监听回调，之前这个回调只转发给
+        # HRGS机器人，不会排预入职登记草稿，导致收藏夹里什么都没出现。
+        event = NS(
+            chat_id=-1,
+            message=NS(id=555, raw_text=ONBOARDING_TEXT, sender_id=self.me.id),
+        )
+        await self.env['on_ssc_onboarding_published'](event)
+        await _drain_background_tasks()
+        pre_items = [r for r in self.outbox.data.values() if r['kind'] == 'pre_onboarding']
+        self.assertEqual(len(pre_items), 1)
+        self.assertEqual(pre_items[0]['destination'], -2)
+        self.assertEqual(pre_items[0]['approval_code'], '测试11')
+        draft_text = next(text for dest, text in self.sent if dest == 9)
+        self.assertIn('候选人姓名：Nancy', draft_text)
+
+    async def test_same_message_is_not_queued_twice(self):
+        # 场景三自动发送的消息，client.send_message返回的sent对象和
+        # on_ssc_onboarding_published监听到的是同一条消息（同一个msg_id）；
+        # 两条路径都会尝试排预入职登记草稿，靠pre_onboarding_queue_forwards
+        # 去重，不能因为两条路径都命中同一条消息就排两次重复草稿。
+        event = NS(
+            chat_id=-1,
+            message=NS(id=555, raw_text=ONBOARDING_TEXT, sender_id=self.me.id),
+        )
+        await self.env['on_ssc_onboarding_published'](event)
+        await self.env['on_ssc_onboarding_published'](event)
+        await _drain_background_tasks()
+        pre_items = [r for r in self.outbox.data.values() if r['kind'] == 'pre_onboarding']
+        self.assertEqual(len(pre_items), 1)
 
 
 if __name__ == '__main__':

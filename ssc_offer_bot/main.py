@@ -172,6 +172,8 @@ ssc_send_lock = asyncio.Lock()
 hrgs_forwards = StateStore(config.DB_PATH + ".hrgs_forward.json")
 hrgs_forward_lock = asyncio.Lock()
 HRGS_BOT_USERNAME = "HRGS_ssc_bot"
+pre_onboarding_queue_forwards = StateStore(config.DB_PATH + ".pre_onboarding_forward.json")
+pre_onboarding_queue_lock = asyncio.Lock()
 daily_report_state = StateStore(config.DAILY_REPORT_STATE_PATH)
 regularization_events = StateStore(config.REGULARIZATION_STATE_PATH)
 regularization_lock = asyncio.Lock()
@@ -231,11 +233,40 @@ async def forward_onboarding_to_hrgs(message, chat_id):
             log.exception("[HRGS转发] msg_id=%s 转发失败；已发起的请求结果需核查，避免重复转发", message.id)
 
 
+async def forward_onboarding_to_pre_onboarding_queue(message, chat_id):
+    """联合管理群一出现入职确认就排到收藏夹，等SSC发预入职登记审批码放行——
+    不管这条入职确认是SSC走场景三正常审批流程发的，还是SSC自己手动直接
+    发到联合管理群的，只要联合管理群里出现了这条消息，这一步都要跑：
+    原来只在场景三的自动发送代码里顺带触发一次，手动发送的入职确认走不到
+    那段代码，收藏夹里就一直不会出现对应的预入职登记草稿。
+    """
+    if not config.PRE_ONBOARDING_FORWARD_ENABLED:
+        return
+    if chat_id != config.GROUP_LEADERSHIP:
+        return
+    text = message.raw_text or ""
+    compact = "".join(text.split())
+    if "入职信息确认" not in compact:
+        return
+    me = await client.get_me()
+    if message.sender_id != me.id:
+        return
+    key = f"{chat_id}:{message.id}"
+    async with pre_onboarding_queue_lock:
+        if pre_onboarding_queue_forwards.get(key):
+            return
+        pre_onboarding_queue_forwards.set(key, {"status": "queuing"})
+    candidate = get_field(parse_kv_fields(text), "候选人姓名") or str(message.id)
+    await queue_pre_onboarding_registration(candidate, text)
+    pre_onboarding_queue_forwards.update(key, status="queued")
+
+
 @client.on(events.NewMessage(chats=config.GROUP_LEADERSHIP, outgoing=True))
 async def on_ssc_onboarding_published(event):
     if event.chat_id in config.EXCLUDED_CHAT_IDS:
         return
     await forward_onboarding_to_hrgs(event.message, event.chat_id)
+    await forward_onboarding_to_pre_onboarding_queue(event.message, event.chat_id)
 
 
 async def get_ssc_reviewer():
@@ -475,7 +506,16 @@ async def on_ssc_send_approval(event):
                 if item["kind"] == "onboarding":
                     # 另起任务：此时仍持有ssc_send_lock，queue_group_message需要
                     # 重新获取同一把锁，必须等当前 async with 退出后才能执行。
-                    asyncio.create_task(queue_pre_onboarding_registration(item["candidate"], text))
+                    # 用 forward_onboarding_to_pre_onboarding_queue 而不是直接
+                    # 调 queue_pre_onboarding_registration：SSC也可能不走场景三
+                    # 的审批流程、直接手动把入职确认发到联合管理群，这种手动
+                    # 发送只会触发 on_ssc_onboarding_published 监听回调，不会
+                    # 经过这里——两条路径统一走同一个带去重的函数，不管是自动
+                    # 发送还是SSC手动发送都能排进收藏夹，也不会因为两条路径
+                    # 都命中同一条消息而重复排队。
+                    asyncio.create_task(
+                        forward_onboarding_to_pre_onboarding_queue(sent, item["destination"])
+                    )
                 if item.get("delete_draft_after_send"):
                     try:
                         await client.delete_messages(reviewer.id, [item["draft_id"]])
