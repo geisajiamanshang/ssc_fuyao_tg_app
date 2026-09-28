@@ -100,9 +100,13 @@ OFFBOARDING_ENABLED = bool(OFFBOARDING_OUTPUT_FOLDER_ID)
 # 复用 GROUP_REGULARIZATION_SYNC 作为数据来源和无详情版目标群，该群ID配置好
 # 之前自动跳过，不报错。
 DAILY_SYNC_ENABLED = bool(GROUP_REGULARIZATION_SYNC)
-# 日报来源群、OpenAI凭证、人效通OneHR登录信息四者都配置好之前，员工自评
-# 自动填表功能整体自动跳过，不报错也不半途而废。
-SELF_EVAL_ENABLED = bool(
+# 员工自评的触发关键词"员工自评"不像审批码那样按环境区分（没有"测试"前缀），
+# 而测试、生产两个进程用的是同一个Telegram账号，SSC在收藏夹发一次两边都会
+# 收到——所以这个功能只允许在生产环境启用，测试环境无论配置填没填都不启用，
+# 避免测试环境跟着凑热闹一起响应、跟生产的结果混在一起。
+# 生产环境还要求日报来源群、OpenAI凭证、人效通OneHR登录信息四者都配置好，
+# 缺一样就自动跳过，不报错也不半途而废。
+SELF_EVAL_ENABLED = ENVIRONMENT == "prod" and bool(
     GROUP_SSC_WORK and OPENAI_API_KEY and ONEHR_LOGIN_CODE and ONEHR_LOGIN_PASSWORD
 )
 # 生产只接受指定机器人的提醒；测试群允许SSC人工粘贴提醒做联调。
