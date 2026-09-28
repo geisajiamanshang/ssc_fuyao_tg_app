@@ -1,6 +1,6 @@
 import ast
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest import IsolatedAsyncioTestCase, TestCase
@@ -195,8 +195,14 @@ class DailySyncTriggerTests(IsolatedAsyncioTestCase):
     def setUp(self):
         self.me = NS(id=9, username='ffuuyao')
         self.sent = []
-        self.today = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
-        self.yesterday = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
+        # 用真实"今天"（按 Asia/Shanghai，跟被测代码用的时区一致）算出的日期
+        # 构造夹具，不能写死具体某一天——被测代码用 datetime.now(tz).date() 判断
+        # "今天"，写死的日期一旦被现实的日期追上就会导致本该算"今天"的消息被
+        # 误判成"不是今天"而被过滤掉。中午12点（UTC）在上海时区还是同一天，
+        # 不会跨日。
+        _today_cn = datetime.now(ZoneInfo('Asia/Shanghai')).date()
+        self.today = datetime(_today_cn.year, _today_cn.month, _today_cn.day, 12, 0, tzinfo=timezone.utc)
+        self.yesterday = self.today - timedelta(days=1)
         self.group_messages = [
             fake_message(501, TRANSFER_NAME, self.today),
             fake_message(500, RESIGNATION, self.today),
