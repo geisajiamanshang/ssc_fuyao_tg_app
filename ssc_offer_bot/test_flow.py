@@ -101,6 +101,59 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ns['apply_approval_evidence'](rec,'final',30,3)[1])
         self.assertEqual(ns['apply_approval_evidence']({'org_unit':'运营中心','approvals':{'first':{'message_id':50}}},'final',40,3)[0],[])
 
+    async def test_reply_directly_to_original_offer_confirm_message_counts_as_approval(self):
+        # 领导不一定回复"请领导审批/终审"那条提示，也可能直接回复SSC最初
+        # 发的那条【offer信息确认】原文；只要发送人TG用户名对得上配置的
+        # 某一级审批人，就该记为该级别审批通过、继续推进，而不是被忽略。
+        rec = {'org_unit': '运营中心', 'stage': 'waiting_final_review',
+               'offer_confirm_msg_id': 100,
+               'approvals': {'first': {'message_id': 99, 'sender_id': 1}}}
+        ns['state'] = Store({'李光': rec})
+        ns['client'].get_me = AsyncMock(return_value=NS(id=99))
+        original = NS(id=100, sender_id=99,
+                      raw_text='运营中心【offer信息确认】\n候选人编码：X1\n候选人姓名：李光\n入职编制组织：运营中心',
+                      reply_to_msg_id=None)
+        event = NS(message=NS(id=200, raw_text='👌', reply_to_msg_id=100,
+                              get_reply_message=AsyncMock(return_value=original)),
+                  sender_id=3, get_sender=AsyncMock(return_value=NS(username='final_user')))
+        await ns['process_leadership_reply'](event)
+        self.assertEqual(rec['approvals']['final']['message_id'], 200)
+        ns['handle_final_approved'].assert_awaited_once()
+        ns['client'].send_message.assert_not_awaited()
+
+    async def test_unrecognized_sender_reply_notifies_ssc(self):
+        # 以前发送人用户名对不上任何配置的审批人时完全静默；现在只要对方
+        # 是明确回复了某条消息（不是随口一句无引用的话），就提醒SSC核实。
+        ns['state'] = Store({})
+        event = NS(message=NS(id=50, raw_text='好的', reply_to_msg_id=10), sender_id=9,
+                   get_sender=AsyncMock(return_value=NS(username='unrelated_person')))
+        await ns['process_leadership_reply'](event)
+        ns['client'].send_message.assert_awaited_once()
+        notice = ns['client'].send_message.call_args.args[1]
+        self.assertIn('未匹配到任何已配置的审批人', notice)
+
+    async def test_unrecognized_sender_without_reply_stays_silent(self):
+        # 没有引用任何消息的一句"好的"本来就不会被当成审批，属于正常闲聊，
+        # 不应该为此打扰SSC。
+        ns['state'] = Store({})
+        event = NS(message=NS(id=50, raw_text='好的', reply_to_msg_id=None), sender_id=9,
+                   get_sender=AsyncMock(return_value=NS(username='unrelated_person')))
+        await ns['process_leadership_reply'](event)
+        ns['client'].send_message.assert_not_awaited()
+
+    async def test_recognized_sender_unresolved_target_notifies_ssc(self):
+        # 发送人是认识的审批人，回复文字也像审批通过，但引用链没能关联到
+        # 任何候选人（比如引用了一条无关消息）——以前只写日志，SSC完全
+        # 看不到；现在会收到提醒去核查。
+        ns['state'] = Store({})
+        ns['approval_target'] = AsyncMock(return_value=(None, None))
+        event = NS(message=NS(id=50, raw_text='好的', reply_to_msg_id=10), sender_id=1,
+                   get_sender=AsyncMock(return_value=NS(username='first_user')))
+        await ns['process_leadership_reply'](event)
+        ns['client'].send_message.assert_awaited_once()
+        notice = ns['client'].send_message.call_args.args[1]
+        self.assertIn('未能关联到任何候选人的Offer记录', notice)
+
     async def test_a_b_continue_c_warn(self):
         data={name:{'org_unit':'运营中心','stage':'waiting_final_review',
                     'offer_confirm_msg_id':i,'approvals':({'first':{'message_id':10,'sender_id':1}} if name!='C' else {})}

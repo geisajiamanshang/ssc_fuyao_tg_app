@@ -83,9 +83,9 @@ ONBOARDING_TRAINING_OUTPUT_FOLDER_ID = os.environ.get(
 # 把紧邻的上一条图文通知转发到收藏夹，经审批码7一次性广播到全部全员群。
 ALL_STAFF_NOTICE_TRIGGER_KEYWORD = "全员群"
 
-# 洛羽-SSC主管-CN私聊里出现账号申请类关键词后自动生成申请草稿；显示名匹配
-# （暂无确认的用户名），后续拿到@用户名可以改成更稳定的用户名匹配。
-ACCOUNT_REQUEST_MANAGER_DISPLAY_NAME = "洛羽-SSC主管-CN"
+# 洛羽-SSC主管-CN私聊里出现账号申请类关键词后自动生成申请草稿；按用户名
+# 匹配（比显示名稳定，改昵称不受影响）。
+ACCOUNT_REQUEST_MANAGER_USERNAME = "huakaifuguiyes"
 
 # 恒睿公司-联合管理群出现"劝退申请"/"离职申请"关键词后，按员工姓名在Drive
 # 云端 离职助手/输出 文件夹查找该员工的《XX_离职信息同步.txt》。文件夹ID
@@ -107,6 +107,32 @@ OFFBOARDING_PROCESS_FOLDER_ID = os.environ.get(
 OFFBOARDING_RETRY_POLL_SECONDS = int(
     os.environ.get("OFFBOARDING_RETRY_POLL_SECONDS", "300")
 )
+
+# ========== 当日人事信息数据同步 ==========
+# "人事数据同步-SSC3组"里【入职信息同步】【转正信息同步】不带"编制组织"字段，
+# 只带"部门-小组"，要靠部门关键词倒推所属中心；【离职信息同步】【人员异动信息同步】
+# 已经直接带"编制组织"字段，不查这张表。顺序即汇总消息里各中心出现的顺序。
+DAILY_SYNC_CENTER_ORDER = ["运营中心", "技术中心", "渠道中心", "商务中心", "效能中心"]
+DAILY_SYNC_CENTER_DEPARTMENT_KEYWORDS = {
+    "运营中心": ["运营1部", "运营一部", "运营2部", "运营二部", "运营3部", "运营三部", "ACFAN"],
+    "技术中心": ["研发部"],
+    "渠道中心": ["渠道部"],
+    "商务中心": ["传统销售部"],
+    "效能中心": ["效能部"],
+}
+DAILY_SYNC_COMPANY_LABEL = "恒睿"
+
+# ========== 员工自评自动填表 ==========
+# 触发关键词：SSC在自己的收藏夹发这句话（包含即可，不要求整条消息完全一样）。
+SELF_EVAL_TRIGGER_KEYWORD = "员工自评"
+# 调用OpenAI把当月日报总结成"本期总结"+"Agent效能自评"文案。
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+# 人效通OneHR（m-reportsys.cc）登录信息；用浏览器自动化登录后把内容填进
+# /self-eval 表单草稿，不点"正式提交"，交由SSC本人核实后自己提交。
+ONEHR_BASE_URL = os.environ.get("ONEHR_BASE_URL", "https://m-reportsys.cc").rstrip("/")
+ONEHR_LOGIN_CODE = os.environ.get("ONEHR_LOGIN_CODE", "").strip()
+ONEHR_LOGIN_PASSWORD = os.environ.get("ONEHR_LOGIN_PASSWORD", "").strip()
 
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({

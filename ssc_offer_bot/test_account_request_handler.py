@@ -49,7 +49,7 @@ def base_config(**overrides):
     fields = dict(
         EXCLUDED_CHAT_IDS=frozenset(),
         ACCOUNT_REQUEST_ENABLED=True,
-        ACCOUNT_REQUEST_MANAGER_DISPLAY_NAME='洛羽-SSC主管-CN',
+        ACCOUNT_REQUEST_MANAGER_USERNAME='huakaifuguiyes',
         GROUP_LEADERSHIP=-1,
         GROUP_ACCOUNT_REQUEST_FOREIGN=-5414021470,
         GROUP_ACCOUNT_REQUEST_WORK=-5309896717,
@@ -81,7 +81,7 @@ def build_env(profile_text=PROFILE_TEXT, find_error=None, **overrides):
         return NS(id=100 + len(sent))
 
     me = NS(id=9, username='ffuuyao')
-    manager = NS(id=555, first_name='洛羽-SSC主管-CN')
+    manager = NS(id=555, username='huakaifuguiyes', first_name='洛羽-SSC主管-CN')
     client = NS(get_me=AsyncMock(return_value=me), send_message=send_message,
                 get_messages=AsyncMock())
 
@@ -118,7 +118,7 @@ def build_env(profile_text=PROFILE_TEXT, find_error=None, **overrides):
 def dm_event(text, msg_id=1, forward=None, sender=None):
     return NS(
         chat_id=555, is_private=True, raw_text=text,
-        get_sender=AsyncMock(return_value=sender or NS(id=555, first_name='洛羽-SSC主管-CN')),
+        get_sender=AsyncMock(return_value=sender or NS(id=555, username='huakaifuguiyes', first_name='洛羽-SSC主管-CN')),
         message=NS(id=msg_id, forward=forward),
     )
 

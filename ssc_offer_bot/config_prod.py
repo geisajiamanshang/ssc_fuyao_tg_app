@@ -29,6 +29,10 @@ GROUP_REGULARIZATION_SYNC = int(os.environ.get(
 GROUP_PRE_ONBOARDING = int(os.environ.get(
     "GROUP_PRE_ONBOARDING", "-1004351797001"
 )) or None
+# 共享服务中心-SSC工作群：员工自评功能收集本账号当月日报的来源群。生产群ID
+# 待补充，先用 list_chats.py 跑一遍拿到真实ID填入 GROUP_SSC_WORK；留空时
+# 员工自评功能自动跳过，不影响其余流程。
+GROUP_SSC_WORK = int(os.environ.get("GROUP_SSC_WORK", "0")) or None
 # 新人培训群：等待补充真实群号前先留空（不影响其他功能，功能自动禁用直到配置）
 GROUP_TRAINING = int(os.environ.get("GROUP_TRAINING", "0")) or None
 # SSC3组内部工作沟通群：与GROUP_REGULARIZATION_TRIGGER共同监控"全员群"关键词。
