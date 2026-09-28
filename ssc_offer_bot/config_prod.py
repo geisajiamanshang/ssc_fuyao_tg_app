@@ -25,6 +25,10 @@ GROUP_ANNIVERSARY_TRIGGER = GROUP_REGULARIZATION_TRIGGER
 GROUP_REGULARIZATION_SYNC = int(os.environ.get(
     "GROUP_REGULARIZATION_SYNC", "-1004468512291"
 ))  # 人事信息同步-SSC3组
+# 共享服务中心-SSC工作群：员工自评功能收集本账号当月日报的来源群。生产群ID
+# 待补充，先用 list_chats.py 跑一遍拿到真实ID填入 GROUP_SSC_WORK；留空时
+# 员工自评功能自动跳过，不影响其余流程。
+GROUP_SSC_WORK = int(os.environ.get("GROUP_SSC_WORK", "0")) or None
 # 预入职登记群：群ID待补充，先用 list_chats.py 跑一遍拿到真实ID，
 # 再通过环境变量 GROUP_PRE_ONBOARDING 或直接替换默认值 "0" 填入。
 # 留空（0）时该功能自动跳过，不影响其余流程，也不会误发到未确认的群。

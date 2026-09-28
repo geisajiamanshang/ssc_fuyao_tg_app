@@ -59,6 +59,17 @@ SSC Offer 审批流转自动化 主程序。
           -> SSC发送测试91/91放行无详情版回人事数据同步-SSC3组；发送
              测试92/92放行详细版到联合管理群
 
+  场景十：SSC在自己的收藏夹发送"员工自评"
+          -> 收集"共享服务中心-SSC工作群"里本账号当月发送的日报（按
+             [TYPE:日报]标签精确识别），交给OpenAI生成人效通OneHR
+             （m-reportsys.cc）"员工自评"表单里"本期总结"四项和"Agent
+             效能自评"的AI工具使用说明；三维评分固定填80分，不用GPT生成
+          -> 用浏览器自动化登录人效通OneHR，把内容填进/self-eval表单
+             草稿（不点"正式提交"）
+          -> 把生成内容的预览发回收藏夹，交由SSC本人登录网站核实后自己
+             提交；这一步没有Telegram群转发环节，所以不经过审批码
+             （APPROVAL_CODES）那一套
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
@@ -135,6 +146,14 @@ from daily_sync import (
     classify_and_bucket,
     new_center_bucket,
 )
+from self_eval import (
+    build_self_eval_prompt,
+    call_openai_chat,
+    collect_month_reports,
+    fill_self_eval_form,
+    format_self_eval_preview,
+    parse_self_eval_response,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -178,6 +197,7 @@ offboarding_lock = asyncio.Lock()
 offboarding_drive = OffboardingDriveRepository(config.OFFBOARDING_OUTPUT_FOLDER_ID)
 offboarding_process_drive = OffboardingApprovalFormRepository(config.OFFBOARDING_PROCESS_FOLDER_ID)
 daily_sync_lock = asyncio.Lock()
+self_eval_lock = asyncio.Lock()
 
 
 async def forward_onboarding_to_hrgs(message, chat_id):
@@ -553,6 +573,81 @@ async def on_ssc_daily_sync_trigger(event):
             "[当日人事信息数据同步] 已生成详细版/无详情版草稿，等待SSC发送%s/%s放行",
             config.DAILY_SYNC_DETAIL_APPROVAL_CODE, config.DAILY_SYNC_SUMMARY_APPROVAL_CODE,
         )
+
+
+@client.on(events.NewMessage())
+async def on_ssc_self_eval_trigger(event):
+    """SSC在自己的收藏夹发"员工自评"（SELF_EVAL_TRIGGER_KEYWORD），触发：
+    收集"共享服务中心-SSC工作群"里本账号当月发的日报（[TYPE:日报]标签）
+    -> 交给GPT生成"本期总结"四项+"Agent效能自评"的AI工具使用说明
+    -> 浏览器自动化登录人效通OneHR，把内容填进/self-eval表单草稿（不点
+       "正式提交"）
+    -> 把生成内容的预览发回收藏夹，交由SSC本人登录网站核实后自己提交。
+    这一步不经过APPROVAL_CODES/select_pending那一套：没有"发送到某个
+    Telegram群"这个环节，最终提交动作在外部网站上，由SSC本人完成。
+    """
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    if config.SELF_EVAL_TRIGGER_KEYWORD not in text:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.SELF_EVAL_ENABLED:
+        await client.send_message(
+            reviewer.id,
+            "员工自评自动填表未启用：GROUP_SSC_WORK / OPENAI_API_KEY / "
+            "ONEHR_LOGIN_CODE / ONEHR_LOGIN_PASSWORD 需要都配置好才会生效。",
+            parse_mode=None,
+        )
+        return
+    async with self_eval_lock:
+        try:
+            today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date()
+            period_label = f"{today.year}年{today.month}月"
+            messages = [
+                message async for message in
+                client.iter_messages(config.GROUP_SSC_WORK, from_user=reviewer.id)
+            ]
+            reports = collect_month_reports(messages, today.year, today.month)
+            prompt = build_self_eval_prompt(reports, period_label)
+            raw_content = await asyncio.to_thread(
+                call_openai_chat, config.OPENAI_API_KEY, config.OPENAI_MODEL, prompt,
+            )
+            content = parse_self_eval_response(raw_content)
+        except Exception:
+            log.exception("[员工自评] 生成内容失败，msg_id=%s", event.message.id)
+            await client.send_message(
+                reviewer.id, "员工自评内容生成失败，请查看机器人日志。",
+                parse_mode=None,
+            )
+            return
+
+        try:
+            await fill_self_eval_form(
+                config.ONEHR_BASE_URL, config.ONEHR_LOGIN_CODE,
+                config.ONEHR_LOGIN_PASSWORD, content,
+            )
+        except Exception:
+            log.exception("[员工自评] 填表失败，msg_id=%s", event.message.id)
+            await client.send_message(
+                reviewer.id,
+                "员工自评内容已生成，但自动登录填表失败，请查看机器人日志；"
+                "以下是生成的内容，可以手动填写：\n\n"
+                + format_self_eval_preview(content, period_label),
+                parse_mode=None,
+            )
+            return
+
+        await client.send_message(
+            reviewer.id,
+            "员工自评已根据本月日报自动填好草稿（未提交），请登录 "
+            + config.ONEHR_BASE_URL + "/self-eval 核实后自行点\"正式提交\"。\n\n"
+            + format_self_eval_preview(content, period_label),
+            parse_mode=None,
+        )
+        log.info("[员工自评] 已生成并填好表单草稿，共%s条本月日报", len(reports))
 
 
 async def _send_saved_text(reviewer_id, text):

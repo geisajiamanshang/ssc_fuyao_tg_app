@@ -100,6 +100,11 @@ OFFBOARDING_ENABLED = bool(OFFBOARDING_OUTPUT_FOLDER_ID)
 # 复用 GROUP_REGULARIZATION_SYNC 作为数据来源和无详情版目标群，该群ID配置好
 # 之前自动跳过，不报错。
 DAILY_SYNC_ENABLED = bool(GROUP_REGULARIZATION_SYNC)
+# 日报来源群、OpenAI凭证、人效通OneHR登录信息四者都配置好之前，员工自评
+# 自动填表功能整体自动跳过，不报错也不半途而废。
+SELF_EVAL_ENABLED = bool(
+    GROUP_SSC_WORK and OPENAI_API_KEY and ONEHR_LOGIN_CODE and ONEHR_LOGIN_PASSWORD
+)
 # 生产只接受指定机器人的提醒；测试群允许SSC人工粘贴提醒做联调。
 ALLOW_MANUAL_TRIGGERS = ENVIRONMENT == "test"
 # GROUP_REGULARIZATION_SYNC / GROUP_PRE_ONBOARDING 未来若在某环境留空（None），
