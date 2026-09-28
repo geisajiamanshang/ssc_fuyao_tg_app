@@ -202,17 +202,21 @@ SELF_EVAL_FIELD_SELECTORS = {
 }
 SELF_EVAL_SCORE_SELECTORS = ("#sa1", "#sa2", "#sa3")
 
+# 登录页选择器：2026-09-28 用一个只读取页面结构、不提交任何内容的诊断脚本
+# 在生产环境核对过真实DOM——登录页界面是英文的，员工编码输入框是
+# #employee_code，密码框是 #password，登录按钮文字是"Sign in"（不是"登录"），
+# 页面右上角另有两个同样 type="submit" 的按钮（深色模式切换、语言切换），
+# 所以按钮必须按可见文字"Sign in"精确匹配，不能只按 type=submit 选。
+LOGIN_EMPLOYEE_CODE_SELECTOR = "#employee_code"
+LOGIN_PASSWORD_SELECTOR = "#password"
+LOGIN_SUBMIT_BUTTON_NAME = "Sign in"
+
 
 async def fill_self_eval_form(base_url, login_code, login_password, content):
     """登录人效通OneHR，把content（parse_self_eval_response的返回值）填进
     /self-eval 表单的"本期总结"和"Agent效能自评"对应输入框。表单本身会自动
     保存草稿（页面右上角"草稿已保存"），这里全程不点"正式提交"，最终提交
     交给SSC本人登录网站核实后手动完成。
-
-    注意：登录页（员工编码/密码输入框、登录按钮）的选择器是按登录页上的
-    可见文字猜的，还没有像表单字段那样在真实页面核对过——第一次在测试
-    环境跑这个功能时，如果登录这一步失败，很可能是这里的选择器需要按
-    真实页面调整。
     """
     from playwright.async_api import async_playwright
 
@@ -221,9 +225,9 @@ async def fill_self_eval_form(base_url, login_code, login_password, content):
         try:
             page = await browser.new_page()
             await page.goto(f"{base_url}/login")
-            await page.get_by_label("员工编码").fill(login_code)
-            await page.get_by_label("密码").fill(login_password)
-            await page.get_by_role("button", name="登录").click()
+            await page.fill(LOGIN_EMPLOYEE_CODE_SELECTOR, login_code)
+            await page.fill(LOGIN_PASSWORD_SELECTOR, login_password)
+            await page.get_by_role("button", name=LOGIN_SUBMIT_BUTTON_NAME, exact=True).click()
             await page.wait_for_url(re.compile(r"/self-eval"), timeout=30000)
 
             for field, selector in SELF_EVAL_FIELD_SELECTORS.items():
