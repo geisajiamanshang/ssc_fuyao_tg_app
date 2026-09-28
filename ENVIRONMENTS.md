@@ -23,6 +23,8 @@
 
 审批码 `测试9`/`9` 是"当日人事信息数据同步"的触发码：SSC在自己的收藏夹发这个码，机器人会汇总"人事数据同步-SSC3组"（`GROUP_REGULARIZATION_SYNC`）里当天本账号发出的【入职信息同步】【转正信息同步】【离职信息同步】【人员异动信息同步】，按运营/技术/渠道/商务/效能五个中心分类计数，生成详细版和无详情版各一条草稿回发收藏夹。`测试91`/`91` 放行无详情版回人事数据同步-SSC3组；`测试92`/`92` 放行详细版到联合管理群。这个功能复用 `GROUP_REGULARIZATION_SYNC` 作为数据来源和无详情版目标群，未配置前自动跳过，不报错。入职/转正来源消息只带"部门-小组"字段，靠部门关键词表（`DAILY_SYNC_CENTER_DEPARTMENT_KEYWORDS`）倒推所属中心；离职/异动来源消息已经直接带"编制组织"字段。
 
+"员工自评"自动填表**没有审批码**：SSC在自己的收藏夹发送"员工自评"这句话（包含即可，不要求整条消息完全一样）即可触发，因为这一步不涉及转发到任何Telegram群，最终"提交"动作在外部网站上，由SSC本人完成。触发后机器人会：①从"共享服务中心-SSC工作群"（`GROUP_SSC_WORK`）收集本账号当月发送的日报（按 `[TYPE:日报]` 标签精确识别，不是模糊匹配"日报"两个字）；②调用OpenAI（`OPENAI_API_KEY`/`OPENAI_MODEL`，默认 `gpt-4o-mini`）根据日报内容生成人效通OneHR（`ONEHR_BASE_URL`，默认 `https://m-reportsys.cc`）"员工自评"表单里"本期总结"四项（工作说明/本期亮点/本期挑战/下期重点）和"Agent效能自评"的AI工具使用说明文字；"Agent效能自评"的三维评分（实际产出提升/工具使用深度/学习分享）固定填80分，不用GPT生成；③用浏览器自动化（Playwright）登录人效通OneHR（`ONEHR_LOGIN_CODE`/`ONEHR_LOGIN_PASSWORD`，即员工编码/密码）把内容填进 `/self-eval` 表单，**全程不点"正式提交"**，表单本身会自动保存草稿；④把生成内容的预览发回收藏夹，交由SSC本人登录网站核实后自己提交。`GROUP_SSC_WORK`/`OPENAI_API_KEY`/`ONEHR_LOGIN_CODE`/`ONEHR_LOGIN_PASSWORD` 四者都配置好前该功能自动跳过，会在收藏夹提示"未启用"，不会静默无反应。测试环境的 `GROUP_SSC_WORK` 已直接写在 `config_test.py` 里，生产环境群ID待用 `list_chats.py` 补充。**首次部署或升级到包含此功能的版本后，除了 `pip install -r requirements.txt`，还必须额外运行一次 `playwright install chromium`（VPS上首次安装可能还需要 `playwright install-deps`），否则填表这一步会报错找不到浏览器。** 登录页（员工编码/密码输入框、登录按钮）的选择器目前是按登录页可见文字猜测的，还没有像表单字段那样在真实页面核对过，第一次在测试环境实际跑通前请留意登录这一步是否成功，需要时根据真实页面调整 `self_eval.py` 里的选择器。
+
 ## 修改和发布流程
 
 1. 所有功能修改只提交到 `test` 分支。

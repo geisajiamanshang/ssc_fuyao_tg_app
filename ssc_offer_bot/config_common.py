@@ -122,6 +122,18 @@ DAILY_SYNC_CENTER_DEPARTMENT_KEYWORDS = {
 }
 DAILY_SYNC_COMPANY_LABEL = "恒睿"
 
+# ========== 员工自评自动填表 ==========
+# 触发关键词：SSC在自己的收藏夹发这句话（包含即可，不要求整条消息完全一样）。
+SELF_EVAL_TRIGGER_KEYWORD = "员工自评"
+# 调用OpenAI把当月日报总结成"本期总结"+"Agent效能自评"文案。
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+# 人效通OneHR（m-reportsys.cc）登录信息；用浏览器自动化登录后把内容填进
+# /self-eval 表单草稿，不点"正式提交"，交由SSC本人核实后自己提交。
+ONEHR_BASE_URL = os.environ.get("ONEHR_BASE_URL", "https://m-reportsys.cc").rstrip("/")
+ONEHR_LOGIN_CODE = os.environ.get("ONEHR_LOGIN_CODE", "").strip()
+ONEHR_LOGIN_PASSWORD = os.environ.get("ONEHR_LOGIN_PASSWORD", "").strip()
+
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({
     -1003559652510,  # HRBP沟通群
