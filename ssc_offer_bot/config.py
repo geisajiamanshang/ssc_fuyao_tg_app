@@ -59,6 +59,13 @@ OFFBOARDING_ACCOUNT_RECLAIM_APPROVAL_CODE = "测试84" if ENVIRONMENT == "test" 
 DAILY_SYNC_TRIGGER_CODE = "测试9" if ENVIRONMENT == "test" else "9"
 DAILY_SYNC_SUMMARY_APPROVAL_CODE = "测试91" if ENVIRONMENT == "test" else "91"
 DAILY_SYNC_DETAIL_APPROVAL_CODE = "测试92" if ENVIRONMENT == "test" else "92"
+# SSC收藏夹发"帐号申请"触发批量扫描花名册、生成本轮全部【员工帐号申请】
+# 草稿（不是释放某条待审批草稿，所以不放进APPROVAL_CODES，由独立监听器
+# 单独识别）；生成后SSC统一发送这个码一次性放行全部草稿到工作帐号需求群
+# -SSC3组，多条时间隔随机5-10秒发送，每条发送成功后立即删除对应收藏夹
+# 草稿——这一点也和APPROVAL_CODES那一套"每次审批最多消费一条"不同，所以
+# 同样不放进去，由独立监听器批量处理。
+ACCOUNT_APPLICATION_APPROVAL_CODE = "测试111" if ENVIRONMENT == "test" else "111"
 APPROVAL_CODES = frozenset({
     OFFER_APPROVAL_CODE,
     REGULARIZATION_APPROVAL_CODE,
@@ -93,6 +100,13 @@ ALL_STAFF_NOTICE_TRIGGER_CHAT_IDS = frozenset(
 ALL_STAFF_NOTICE_ENABLED = bool(ALL_STAFF_NOTICE_TRIGGER_CHAT_IDS)
 # 两个需求群的ID都配置好之前该功能自动跳过，不报错也不误发。
 ACCOUNT_REQUEST_ENABLED = bool(GROUP_ACCOUNT_REQUEST_FOREIGN) and bool(GROUP_ACCOUNT_REQUEST_WORK)
+# 花名册/帐号申请助手两个Drive文件夹ID、工作帐号需求群-SSC3组三者都配置
+# 好之前该功能自动跳过，不报错也不误发。
+ACCOUNT_APPLICATION_ENABLED = bool(
+    ACCOUNT_APPLICATION_ROSTER_FOLDER_ID
+    and ACCOUNT_APPLICATION_ASSISTANT_FOLDER_ID
+    and GROUP_ACCOUNT_REQUEST_WORK
+)
 # 离职助手/输出 Drive文件夹ID配置好之前，离职审批功能整体自动跳过；
 # 83的第二个目标群（GROUP_OFFBOARDING_BUSINESS_SYNC）、84的目标群
 # （GROUP_ACCOUNT_REQUEST_WORK）各自缺失时只跳过对应那一步，不影响其余。
