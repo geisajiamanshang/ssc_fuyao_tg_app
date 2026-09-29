@@ -138,15 +138,17 @@ ONEHR_LOGIN_PASSWORD = os.environ.get("ONEHR_LOGIN_PASSWORD", "").strip()
 # SSC收藏夹出现"帐号申请"关键词后，读取"花名册"和"花名册（机器人）"两张
 # 在线Google表格（真实地址记在花名册Drive文件夹里的"共享资源地址.rtf"，
 # 不是文件夹本身直接放着这两张表，所以这里直接记录解析出来的表格ID/分页
-# gid，不依赖每次现读那份说明文件），筛出生效日期距今>=6天、且AD列(工作
-# TG)等于AE列(私人联系方式)——即工作TG仍是占位、还没换成真正工作TG——的
-# 人；同名以"花名册"为准，重复名单会先发一条收藏夹提示。按O列部门套理由：
-# 研发部/效能部固定"新人入职工作需要"，套用【员工账号申请】格式；其他部门
-# "新人入职满7天"（仅对2026-10-1起生效的人生效），套用【员工工作帐号申请】
-# 格式——两种格式都是照抄"帐号申请助手/模版.rtf"里对应部门的真实历史例子，
-# 见account_application.py。生成的草稿分别发到收藏夹；SSC统一发送111放行，
-# 逐条间隔随机5-10秒转发到工作帐号需求群-SSC3组（复用现有的
-# GROUP_ACCOUNT_REQUEST_WORK），每条发送成功后立即删除对应收藏夹草稿。
+# gid，不依赖每次现读那份说明文件），筛出生效日期>=ACCOUNT_APPLICATION_
+# CUTOVER_DATE（不论部门，早于这个日期的历史存量不处理）、且距今>=6天、
+# 且工作TG(AD列)还没换成真正工作TG的人——具体表现为AD列空白、填的是"同上"
+# 这类占位文字、或者跟AE列(私人联系方式)完全相同；同名以"花名册"为准，
+# 重复名单会先发一条收藏夹提示。按O列部门套理由：研发部/效能部固定"新人
+# 入职工作需要"，套用【员工账号申请】格式；其他部门"新人入职满7天"，套用
+# 【员工工作帐号申请】格式——两种格式都是照抄"帐号申请助手/模版.rtf"里
+# 对应部门的真实历史例子，见account_application.py。生成的草稿分别发到
+# 收藏夹；SSC统一发送111放行，逐条间隔随机5-10秒转发到工作帐号需求群-
+# SSC3组（复用现有的GROUP_ACCOUNT_REQUEST_WORK），每条发送成功后立即
+# 删除对应收藏夹草稿。
 #
 # 读取这两张表需要Sheets API v4（按gid精确定位分页，Drive的CSV导出接口
 # 不支持选分页），除了服务账号已有的drive.readonly，还需要额外申请
@@ -172,10 +174,11 @@ ACCOUNT_APPLICATION_ROSTER_BOT_SHEET_GID = int(os.environ.get(
     "ACCOUNT_APPLICATION_ROSTER_BOT_SHEET_GID", "139264850"
 ))
 ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE = 6
-# 研发部/效能部理由固定"新人入职工作需要"；其他部门理由"新人入职满7天"，
-# 只对生效日期>=这个日期起的人生效，历史存量不在本次自动化范围内。
+# 研发部/效能部理由固定"新人入职工作需要"；其他部门理由"新人入职满7天"。
 ACCOUNT_APPLICATION_TECH_DEPARTMENTS = ("研发部", "效能部")
-ACCOUNT_APPLICATION_OTHER_REASON_CUTOVER_DATE = "2026-10-01"
+# 不论部门，只对生效日期>=这个日期起的人生效；历史存量（哪怕是研发部/
+# 效能部）不在本次自动化范围内，需要的话人工处理。
+ACCOUNT_APPLICATION_CUTOVER_DATE = "2026-10-01"
 
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """帐号申请自动化：SSC收藏夹出现"帐号申请"后，读取"花名册"和"花名册（机器
-人）"两张在线Google表格，找出已生效满一定天数、但工作TG(AD列)仍等于私人
-联系方式(AE列)——也就是工作TG还只是占位、还没换成真正工作TG——的人，按
-部门套用不同理由和不同的消息格式，分别生成账号申请草稿。
+人）"两张在线Google表格，找出生效日期>=cutover_date（不论部门）、且已生效
+满一定天数、但工作TG(AD列)还没换成真正工作TG的人——具体表现为AD列空白、
+填的是"同上"这类占位文字、或者跟私人联系方式(AE列)完全相同，按部门套用
+不同理由和不同的消息格式，分别生成账号申请草稿。
 
 纯逻辑（两表合并/筛选/理由判断/文案拼装）单独放在这里，不涉及Telegram
 调用，方便独立测试；Drive/Sheets读取复用service_account凭证，只是比
@@ -99,11 +100,17 @@ def merge_rosters(primary_rows, secondary_rows):
     return list(merged.values()), conflicts
 
 
+# 工作TG(AD列)填的是这些占位文字之一，跟留空一样表示"还没申请"——花名册
+# 里有些人直接写"同上"表示跟私人联系方式(AE列)一样，而不是真的重复填一遍。
+_PLACEHOLDER_WORK_TG_MARKERS = ("同上",)
+
+
 def needs_account_application(candidate, today, *, min_days=6):
-    """生效日期与今日相差>=min_days天，且工作TG(AD)等于私人联系方式(AE)、
-    两者都不为空——说明工作TG目前只是私人联系方式的占位，还没换成真正的
-    工作TG，需要申请。生效日期解析失败、或AD/AE有一个是空的（数据不全，
-    不是"还没申请"这个状态本身）一律跳过。
+    """生效日期与今日相差>=min_days天，且工作TG(AD)还没换成真正的工作TG——
+    具体表现为以下任意一种：完全空白、填的是"同上"这类占位文字、或者跟
+    私人联系方式(AE)完全相同（说明只是把AE抄了一遍占位）。工作TG已经填了
+    具体的、跟AE不同的内容，才认为已经申请过，不处理。生效日期解析失败则
+    跳过。
     """
     effective = candidate.get("effective_date")
     if effective is None:
@@ -111,8 +118,12 @@ def needs_account_application(candidate, today, *, min_days=6):
     if (today - effective).days < min_days:
         return False
     work_tg = (candidate.get("work_tg") or "").strip()
+    if not work_tg:
+        return True
+    if any(marker in work_tg for marker in _PLACEHOLDER_WORK_TG_MARKERS):
+        return True
     personal_contact = (candidate.get("personal_contact") or "").strip()
-    if not work_tg or not personal_contact:
+    if not personal_contact:
         return False
     return work_tg == personal_contact
 
@@ -125,16 +136,16 @@ def is_tech_department(candidate, *, tech_departments):
 
 
 def account_application_reason(candidate, today, *, tech_departments, cutover_date):
-    """研发部/效能部固定"新人入职工作需要"；其他部门理由是"新人入职满7
-    天"，只对生效日期>=cutover_date起的人生效，返回None表示这个人本次不
-    处理（其他部门、生效日期早于cutover_date的历史存量不在本次自动化范围
-    内）。
+    """不论部门，生效日期都必须>=cutover_date才处理（早于这个日期的历史
+    存量不在本次自动化范围内，返回None表示本次不处理这个人）；生效日期
+    达标后，研发部/效能部理由固定"新人入职工作需要"，其他部门理由是
+    "新人入职满7天"。
     """
-    if is_tech_department(candidate, tech_departments=tech_departments):
-        return "新人入职工作需要"
     effective = candidate.get("effective_date")
     if effective is None or effective < cutover_date:
         return None
+    if is_tech_department(candidate, tech_departments=tech_departments):
+        return "新人入职工作需要"
     return "新人入职满7天"
 
 

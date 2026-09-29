@@ -72,12 +72,13 @@ SSC Offer 审批流转自动化 主程序。
 
   场景十一：SSC在自己的收藏夹发送"帐号申请"
           -> 读取"花名册"和"花名册（机器人）"两张在线Google表格（同名以
-             "花名册"为准，冲突名单先提示收藏夹），筛出生效日期距今>=6天、
-             且工作TG(AD列)仍等于私人联系方式(AE列)——说明工作TG还只是
-             占位、还没换成真正工作TG——的人，按部门套用理由和格式（研发部/
-             效能部固定"新人入职工作需要"，套【员工账号申请】格式；其他
-             部门"新人入职满7天"，仅对2026-10-1起生效的人生效，套【员工
-             工作帐号申请】格式）分别生成草稿发到收藏夹
+             "花名册"为准，冲突名单先提示收藏夹），筛出生效日期>=2026-10-1
+             （不论部门，历史存量不处理）、且距今>=6天、且工作TG(AD列)还
+             没换成真正工作TG——AD列空白、填"同上"这类占位文字、或者跟AE列
+             (私人联系方式)完全相同都算——的人，按部门套用理由和格式（研发
+             部/效能部"新人入职工作需要"，套【员工账号申请】格式；其他部门
+             "新人入职满7天"，套【员工工作帐号申请】格式）分别生成草稿发到
+             收藏夹
           -> SSC发送111统一放行本轮全部草稿：逐条间隔随机5-10秒转发到
              工作帐号需求群-SSC3组，每条发送成功后立即删除对应收藏夹草稿
 
@@ -722,11 +723,12 @@ async def on_ssc_self_eval_trigger(event):
 async def on_ssc_account_application_trigger(event):
     """SSC在自己的收藏夹发"帐号申请"（ACCOUNT_APPLICATION_TRIGGER_KEYWORD），
     触发：读取"花名册"和"花名册（机器人）"两张在线Google表格（同名以"花名
-    册"为准，冲突名单先发一条收藏夹提示），筛出生效日期距今>=6天、且工作TG
-    (AD列)仍等于私人联系方式(AE列)——说明工作TG还只是占位、还没换成真正
-    工作TG——的人，按部门套用理由和格式（研发部/效能部固定"新人入职工作
-    需要"，套【员工账号申请】格式；其他部门"新人入职满7天"，仅对
-    2026-10-01起生效的人生效，套【员工工作帐号申请】格式）分别生成草稿发到
+    册"为准，冲突名单先发一条收藏夹提示），筛出生效日期>=ACCOUNT_
+    APPLICATION_CUTOVER_DATE（不论部门，早于这个日期的历史存量不处理）、
+    且距今>=6天、且工作TG(AD列)还没换成真正工作TG——AD列空白、填"同上"这
+    类占位文字、或者跟私人联系方式(AE列)完全相同都算——的人，按部门套用
+    理由和格式（研发部/效能部"新人入职工作需要"，套【员工账号申请】格式；
+    其他部门"新人入职满7天"，套【员工工作帐号申请】格式）分别生成草稿发到
     收藏夹。SSC统一发送ACCOUNT_APPLICATION_APPROVAL_CODE（111/测试111）
     一次性放行全部草稿，见on_ssc_account_application_release；这一步是
     发起新一轮生成，不是释放某条已排队的草稿，所以不放进APPROVAL_CODES，
@@ -776,7 +778,7 @@ async def on_ssc_account_application_trigger(event):
 
         today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date()
         cutover_date = datetime.strptime(
-            config.ACCOUNT_APPLICATION_OTHER_REASON_CUTOVER_DATE, "%Y-%m-%d"
+            config.ACCOUNT_APPLICATION_CUTOVER_DATE, "%Y-%m-%d"
         ).date()
         trigger_key = f"{event.chat_id}:{event.message.id}"
 
