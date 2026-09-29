@@ -134,6 +134,35 @@ ONEHR_BASE_URL = os.environ.get("ONEHR_BASE_URL", "https://m-reportsys.cc").rstr
 ONEHR_LOGIN_CODE = os.environ.get("ONEHR_LOGIN_CODE", "").strip()
 ONEHR_LOGIN_PASSWORD = os.environ.get("ONEHR_LOGIN_PASSWORD", "").strip()
 
+# ========== 帐号申请自动化 ==========
+# SSC收藏夹出现"帐号申请"关键词后，扫描花名册Drive文件夹下"花名册"和
+# "花名册（机器人）"两张表（同名以"花名册"为准，冲突名单会先发一条收藏夹
+# 提示），筛出生效日期距今>=6天且AD/AE两列（工作帐号申请状态）仍不同的
+# 人，套用帐号申请助手文件夹下的「帐号申请模版」分别生成【员工帐号申请】
+# 草稿发到收藏夹；SSC统一发送111放行，逐条间隔随机5-10秒转发到工作帐号
+# 需求群-SSC3组（复用现有的GROUP_ACCOUNT_REQUEST_WORK），每条发送成功后
+# 立即删除对应收藏夹草稿。
+ACCOUNT_APPLICATION_TRIGGER_KEYWORD = "帐号申请"
+# 花名册所在Drive文件夹：https://drive.google.com/drive/u/1/folders/1_-K1NqqGhLEvr8kVBdheCsbIHoT_cFsV
+ACCOUNT_APPLICATION_ROSTER_FOLDER_ID = os.environ.get(
+    "ACCOUNT_APPLICATION_ROSTER_FOLDER_ID", "1_-K1NqqGhLEvr8kVBdheCsbIHoT_cFsV"
+)
+# 帐号申请助手文件夹（内含"步骤""帐号申请模版"）：
+# https://drive.google.com/drive/u/1/folders/1pgQFwdl8tV8RP1pOkkHpKpdiwxUwfJtT
+ACCOUNT_APPLICATION_ASSISTANT_FOLDER_ID = os.environ.get(
+    "ACCOUNT_APPLICATION_ASSISTANT_FOLDER_ID", "1pgQFwdl8tV8RP1pOkkHpKpdiwxUwfJtT"
+)
+# 花名册列位置（电子表格列字母）：C姓名 F生效日期 O部门 AD/AE工作帐号申请状态对比列。
+ACCOUNT_APPLICATION_NAME_COLUMN = "C"
+ACCOUNT_APPLICATION_EFFECTIVE_DATE_COLUMN = "F"
+ACCOUNT_APPLICATION_DEPARTMENT_COLUMN = "O"
+ACCOUNT_APPLICATION_STATUS_COLUMNS = ("AD", "AE")
+ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE = 6
+# 研发部/效能部理由固定"新人入职工作需要"；其他部门理由"新人入职满7天"，
+# 只对生效日期>=这个日期起的人生效，历史存量不在本次自动化范围内。
+ACCOUNT_APPLICATION_TECH_DEPARTMENTS = ("研发部", "效能部")
+ACCOUNT_APPLICATION_OTHER_REASON_CUTOVER_DATE = "2026-10-01"
+
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({
     -1003559652510,  # HRBP沟通群

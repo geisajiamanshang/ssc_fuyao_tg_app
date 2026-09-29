@@ -70,12 +70,23 @@ SSC Offer 审批流转自动化 主程序。
              提交；这一步没有Telegram群转发环节，所以不经过审批码
              （APPROVAL_CODES）那一套
 
+  场景十一：SSC在自己的收藏夹发送"帐号申请"
+          -> 到Drive云端花名册文件夹读取"花名册"和"花名册（机器人）"两张
+             表（同名以"花名册"为准，冲突名单先提示收藏夹），筛出生效日期
+             距今>=6天且AD/AE两列仍不同（还没申请工作帐号）的人，按部门
+             套用理由（研发部/效能部固定"新人入职工作需要"；其他部门"新人
+             入职满7天"，仅对2026-10-1起生效的人生效），套用帐号申请助手
+             文件夹下的「帐号申请模版」分别生成【员工帐号申请】草稿发到
+             收藏夹
+          -> SSC发送111统一放行本轮全部草稿：逐条间隔随机5-10秒转发到
+             工作帐号需求群-SSC3组，每条发送成功后立即删除对应收藏夹草稿
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92”，
-     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92/测试111”，
+     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92/111”。
 """
 
 import asyncio
@@ -131,6 +142,15 @@ from account_request import (
     matches_account_request_keyword,
     name_from_direct_text,
     name_from_forward_sender_name,
+)
+from account_application import (
+    AccountApplicationDriveRepository,
+    account_application_reason,
+    build_account_application_text,
+    merge_rosters,
+    needs_account_application,
+    parse_roster_csv,
+    parse_roster_date,
 )
 from offboarding import (
     OffboardingApprovalFormRepository,
@@ -200,6 +220,11 @@ offboarding_drive = OffboardingDriveRepository(config.OFFBOARDING_OUTPUT_FOLDER_
 offboarding_process_drive = OffboardingApprovalFormRepository(config.OFFBOARDING_PROCESS_FOLDER_ID)
 daily_sync_lock = asyncio.Lock()
 self_eval_lock = asyncio.Lock()
+account_application_lock = asyncio.Lock()
+account_application_drive = AccountApplicationDriveRepository(
+    config.ACCOUNT_APPLICATION_ROSTER_FOLDER_ID,
+    config.ACCOUNT_APPLICATION_ASSISTANT_FOLDER_ID,
+)
 
 
 async def forward_onboarding_to_hrgs(message, chat_id):
@@ -688,6 +713,188 @@ async def on_ssc_self_eval_trigger(event):
             parse_mode=None,
         )
         log.info("[员工自评] 已生成并填好表单草稿，共%s条本月日报", len(reports))
+
+
+@client.on(events.NewMessage())
+async def on_ssc_account_application_trigger(event):
+    """SSC在自己的收藏夹发"帐号申请"（ACCOUNT_APPLICATION_TRIGGER_KEYWORD），
+    触发：读取花名册Drive文件夹下"花名册"和"花名册（机器人）"两张表（同名
+    以"花名册"为准，冲突名单先发一条收藏夹提示），筛出生效日期距今>=6天且
+    AD/AE两列（工作帐号申请状态）仍不同、说明还没申请工作帐号的人，按部门
+    套用理由（研发部/效能部固定"新人入职工作需要"；其他部门"新人入职满7
+    天"，仅对2026-10-01起生效的人生效），套用帐号申请助手文件夹下的「帐号
+    申请模版」分别生成【员工帐号申请】草稿发到收藏夹。SSC统一发送
+    ACCOUNT_APPLICATION_APPROVAL_CODE（111/测试111）一次性放行全部草稿，
+    见on_ssc_account_application_release；这一步是发起新一轮生成，不是
+    释放某条已排队的草稿，所以不放进APPROVAL_CODES，用独立监听器单独识别。
+    """
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    if config.ACCOUNT_APPLICATION_TRIGGER_KEYWORD not in text:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.ACCOUNT_APPLICATION_ENABLED:
+        await client.send_message(
+            reviewer.id,
+            "帐号申请自动化未启用：花名册/帐号申请助手 Drive文件夹ID、"
+            "工作帐号需求群-SSC3组(GROUP_ACCOUNT_REQUEST_WORK) 需要都配置"
+            "好才会生效。",
+            parse_mode=None,
+        )
+        return
+    async with account_application_lock:
+        try:
+            primary_csv, secondary_csv = await asyncio.to_thread(
+                account_application_drive.load_rosters
+            )
+            template_text = await asyncio.to_thread(account_application_drive.load_template)
+        except Exception:
+            log.exception("[帐号申请] 读取花名册/模版失败，msg_id=%s", event.message.id)
+            await client.send_message(
+                reviewer.id, "帐号申请自动化读取花名册或模版失败，请查看机器人日志。",
+                parse_mode=None,
+            )
+            return
+
+        primary_rows = parse_roster_csv(
+            primary_csv,
+            name_col=config.ACCOUNT_APPLICATION_NAME_COLUMN,
+            date_col=config.ACCOUNT_APPLICATION_EFFECTIVE_DATE_COLUMN,
+            dept_col=config.ACCOUNT_APPLICATION_DEPARTMENT_COLUMN,
+            status_cols=config.ACCOUNT_APPLICATION_STATUS_COLUMNS,
+        )
+        secondary_rows = parse_roster_csv(
+            secondary_csv,
+            name_col=config.ACCOUNT_APPLICATION_NAME_COLUMN,
+            date_col=config.ACCOUNT_APPLICATION_EFFECTIVE_DATE_COLUMN,
+            dept_col=config.ACCOUNT_APPLICATION_DEPARTMENT_COLUMN,
+            status_cols=config.ACCOUNT_APPLICATION_STATUS_COLUMNS,
+        )
+        merged, conflicts = merge_rosters(primary_rows, secondary_rows)
+        if conflicts:
+            await client.send_message(
+                reviewer.id,
+                "帐号申请自动化提示：以下姓名在「花名册」和「花名册（机器"
+                "人）」两张表中重复，已按「花名册」的内容为准：\n"
+                + "、".join(conflicts),
+                parse_mode=None,
+            )
+
+        today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date()
+        cutover_date = datetime.strptime(
+            config.ACCOUNT_APPLICATION_OTHER_REASON_CUTOVER_DATE, "%Y-%m-%d"
+        ).date()
+        trigger_key = f"{event.chat_id}:{event.message.id}"
+
+        queued = 0
+        for row in merged:
+            row["effective_date"] = parse_roster_date(row["effective_date_raw"])
+            if not needs_account_application(
+                row, today, min_days=config.ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE
+            ):
+                continue
+            reason = account_application_reason(
+                row, today,
+                tech_departments=config.ACCOUNT_APPLICATION_TECH_DEPARTMENTS,
+                cutover_date=cutover_date,
+            )
+            if reason is None:
+                continue
+            draft_text = build_account_application_text(
+                row, reason, template_text, today=today.isoformat()
+            )
+            await queue_group_message(
+                config.GROUP_ACCOUNT_REQUEST_WORK, draft_text,
+                candidate=f"account_application:{trigger_key}:{row['name']}",
+                expected_stage="waiting_ssc_account_application",
+                updates={"stage": "account_application_sent"},
+                kind="account_application",
+                approval_code=config.ACCOUNT_APPLICATION_APPROVAL_CODE,
+                delete_draft_after_send=True,
+            )
+            queued += 1
+
+        if queued:
+            log.info(
+                "[帐号申请] 本次共生成%s条草稿，等待SSC发送%s统一放行"
+                "（多条间隔随机5-10秒发送）",
+                queued, config.ACCOUNT_APPLICATION_APPROVAL_CODE,
+            )
+        else:
+            await client.send_message(
+                reviewer.id, "帐号申请自动化：本次扫描花名册没有找到需要处理的人。",
+                parse_mode=None,
+            )
+
+
+@client.on(events.NewMessage())
+async def on_ssc_account_application_release(event):
+    """SSC在自己的收藏夹发送ACCOUNT_APPLICATION_APPROVAL_CODE（111/测试
+    111），一次性放行本轮全部待发送的【员工帐号申请】草稿到工作帐号需求群
+    -SSC3组：逐条发送，间隔随机5-10秒，每条发送成功后立即删除对应收藏夹
+    草稿（不等整批发完再删）。这个码不放进APPROVAL_CODES/select_pending，
+    因为它一次要释放多条草稿，不是"每次审批最多消费一条"的语义；发送失败
+    的条目保持"sending"状态待人工核查，不自动重发，避免重复转发。
+    """
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    if text != config.ACCOUNT_APPLICATION_APPROVAL_CODE:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.ACCOUNT_APPLICATION_ENABLED:
+        return
+    pending = sorted(
+        (item for item in outbox.all().values()
+         if item.get("kind") == "account_application"
+         and item.get("status") == "pending"
+         and item.get("review_chat_id") == reviewer.id),
+        key=lambda item: item["draft_id"],
+    )
+    if not pending:
+        return
+    for index, item in enumerate(pending):
+        key = str(item["draft_id"])
+        # 逐条重新确认还是pending：两次触发之间SSC可能已经处理过这一条。
+        current = outbox.all().get(key)
+        if not current or current.get("status") != "pending":
+            continue
+        async with ssc_send_lock:
+            try:
+                draft = await client.get_messages(reviewer.id, ids=item["draft_id"])
+                if not draft or (not draft.raw_text and not draft.media):
+                    log.warning("[帐号申请] 草稿不存在或为空，msg_id=%s", item["draft_id"])
+                    outbox.update(key, status="failed")
+                    continue
+                outbox.update(key, status="sending", approval_msg_id=event.message.id)
+                sent = await client.send_message(
+                    item["destination"], draft.raw_text or "",
+                    file=draft.media, parse_mode=None,
+                )
+                state.update(item["candidate"], **item["updates"])
+                outbox.update(key, status="sent", sent_msg_id=sent.id)
+                log.info(
+                    "[帐号申请] 已发送至群=%s msg_id=%s（%s/%s）",
+                    item["destination"], sent.id, index + 1, len(pending),
+                )
+                try:
+                    await client.delete_messages(reviewer.id, [item["draft_id"]])
+                except Exception:
+                    log.exception(
+                        "[帐号申请] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"]
+                    )
+            except Exception:
+                log.exception(
+                    "[帐号申请] 发送或保存失败，草稿msg_id=%s；结果待核查，不自动重发",
+                    item["draft_id"],
+                )
+        if index < len(pending) - 1:
+            await asyncio.sleep(random.uniform(5, 10))
 
 
 async def _send_saved_text(reviewer_id, text):
