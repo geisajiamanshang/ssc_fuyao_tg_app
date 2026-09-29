@@ -4,54 +4,74 @@ from datetime import date
 from account_application import (
     account_application_reason,
     build_account_application_text,
+    is_tech_department,
     merge_rosters,
     needs_account_application,
-    parse_roster_csv,
     parse_roster_date,
+    parse_roster_rows,
 )
 
 
-def roster_row(*, col_c="", col_f="", col_o="", col_ad="", col_ae=""):
-    """按列字母拼一行27列(A..AE)宽的CSV行，方便测试用列字母定位而不是数数字下标。"""
+def roster_sheet_rows(*data_rows):
+    """拼出跟真实"花名册"结构一致的行列表：前3行是标题/分组表头/字段表头
+    （内容对parse_roster_rows不重要，只占位），从第4行开始才是数据。"""
+    title_row = ["在职花名册"]
+    group_header_row = ["基础身份"]
+    field_header_row = ["序号", "员工编码（新）", "花名*", "姓名/简历名（选填）",
+                         "在职状态*", "生效日期（入/调）"]
+    return [title_row, group_header_row, field_header_row, *data_rows]
+
+
+def data_row(*, employee_code="", name="", resume_name="", effective_date="",
+             org_unit="", service_unit="", department="", work_tg="", personal_contact=""):
+    """按列字母位置(B/C/D/F/L/N/O/AD/AE)拼一行，其余列留空字符串。"""
     cells = ["" for _ in range(31)]  # A(0)..AE(30)
-    cells[2] = col_c   # C 姓名
-    cells[5] = col_f   # F 生效日期
-    cells[14] = col_o  # O 部门
-    cells[29] = col_ad  # AD
-    cells[30] = col_ae  # AE
-    return ",".join(cells)
+    cells[1] = employee_code   # B
+    cells[2] = name            # C
+    cells[3] = resume_name     # D
+    cells[5] = effective_date  # F
+    cells[11] = org_unit       # L
+    cells[13] = service_unit   # N
+    cells[14] = department     # O
+    cells[29] = work_tg        # AD
+    cells[30] = personal_contact  # AE
+    return cells
 
 
-def make_csv(*rows):
-    header = ",".join(["header"] * 31)
-    return "\n".join([header, *rows])
-
-
-class ParseRosterCsvTests(unittest.TestCase):
+class ParseRosterRowsTests(unittest.TestCase):
     def test_extracts_named_columns_by_letter(self):
-        csv_text = make_csv(
-            roster_row(col_c="廖伊波", col_f="2026-09-01", col_o="效能中心-效能部",
-                       col_ad="已申请", col_ae="未申请"),
+        rows = roster_sheet_rows(
+            data_row(employee_code="YY6357", name="范谦和", resume_name="范德",
+                     effective_date="2026-09-17", org_unit="运营中心",
+                     service_unit="恒睿", department="运营1部",
+                     work_tg="@fanqianhe1108", personal_contact="@fanqianhe123"),
         )
-        rows = parse_roster_csv(csv_text, name_col="C", date_col="F", dept_col="O",
-                                 status_cols=("AD", "AE"))
-        self.assertEqual(len(rows), 1)
-        row = rows[0]
-        self.assertEqual(row["name"], "廖伊波")
-        self.assertEqual(row["effective_date_raw"], "2026-09-01")
-        self.assertEqual(row["department"], "效能中心-效能部")
-        self.assertEqual(row["status_values"], ["已申请", "未申请"])
+        candidates = parse_roster_rows(rows)
+        self.assertEqual(len(candidates), 1)
+        row = candidates[0]
+        self.assertEqual(row["employee_code"], "YY6357")
+        self.assertEqual(row["name"], "范谦和")
+        self.assertEqual(row["resume_name"], "范德")
+        self.assertEqual(row["effective_date_raw"], "2026-09-17")
+        self.assertEqual(row["org_unit"], "运营中心")
+        self.assertEqual(row["service_unit"], "恒睿")
+        self.assertEqual(row["department"], "运营1部")
+        self.assertEqual(row["work_tg"], "@fanqianhe1108")
+        self.assertEqual(row["personal_contact"], "@fanqianhe123")
 
     def test_skips_rows_with_empty_name(self):
-        csv_text = make_csv(roster_row(col_c="", col_f="2026-09-01"))
-        rows = parse_roster_csv(csv_text, name_col="C", date_col="F", dept_col="O",
-                                 status_cols=("AD", "AE"))
-        self.assertEqual(rows, [])
+        rows = roster_sheet_rows(data_row(name="", effective_date="2026-09-01"))
+        candidates = parse_roster_rows(rows)
+        self.assertEqual(candidates, [])
 
-    def test_skips_rows_shorter_than_needed_columns(self):
-        rows = parse_roster_csv("表头\n廖伊波,x", name_col="C", date_col="F", dept_col="O",
-                                 status_cols=("AD", "AE"))
-        self.assertEqual(rows, [])
+    def test_handles_short_rows_missing_trailing_columns(self):
+        # Sheets API对行尾全空的单元格会直接省略，不会补齐到AE列。
+        rows = roster_sheet_rows(["1", "YY0001", "阿林"])
+        candidates = parse_roster_rows(rows)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["name"], "阿林")
+        self.assertEqual(candidates[0]["work_tg"], "")
+        self.assertEqual(candidates[0]["personal_contact"], "")
 
 
 class ParseRosterDateTests(unittest.TestCase):
@@ -84,30 +104,49 @@ class MergeRostersTests(unittest.TestCase):
 
 
 class NeedsAccountApplicationTests(unittest.TestCase):
-    def test_true_when_effective_long_enough_and_status_differs(self):
+    def test_true_when_effective_long_enough_and_work_tg_still_placeholder(self):
+        # 真实例子：阿林还没申请，工作TG(AD)和私人联系方式(AE)相同。
         row = {
             "effective_date": date(2026, 9, 1),
-            "status_values": ["已申请", "未申请"],
+            "work_tg": "@alin65175",
+            "personal_contact": "@alin65175",
         }
         self.assertTrue(needs_account_application(row, date(2026, 9, 10)))
+
+    def test_false_when_work_tg_already_different_from_personal_contact(self):
+        # 真实例子：范谦和已经申请过，工作TG和私人联系方式不同。
+        row = {
+            "effective_date": date(2026, 9, 1),
+            "work_tg": "@fanqianhe1108",
+            "personal_contact": "@fanqianhe123",
+        }
+        self.assertFalse(needs_account_application(row, date(2026, 9, 10)))
 
     def test_false_when_not_enough_days_elapsed(self):
         row = {
             "effective_date": date(2026, 9, 8),
-            "status_values": ["已申请", "未申请"],
-        }
-        self.assertFalse(needs_account_application(row, date(2026, 9, 10)))
-
-    def test_false_when_status_values_equal(self):
-        row = {
-            "effective_date": date(2026, 9, 1),
-            "status_values": ["已申请", "已申请"],
+            "work_tg": "@x", "personal_contact": "@x",
         }
         self.assertFalse(needs_account_application(row, date(2026, 9, 10)))
 
     def test_false_when_date_unparseable(self):
-        row = {"effective_date": None, "status_values": ["已申请", "未申请"]}
+        row = {"effective_date": None, "work_tg": "@x", "personal_contact": "@x"}
         self.assertFalse(needs_account_application(row, date(2026, 9, 10)))
+
+    def test_false_when_either_contact_field_empty(self):
+        row = {"effective_date": date(2026, 9, 1), "work_tg": "", "personal_contact": ""}
+        self.assertFalse(needs_account_application(row, date(2026, 9, 10)))
+
+
+class IsTechDepartmentTests(unittest.TestCase):
+    TECH = ("研发部", "效能部")
+
+    def test_matches_tech_keywords(self):
+        self.assertTrue(is_tech_department({"department": "技术中心-研发部"}, tech_departments=self.TECH))
+        self.assertTrue(is_tech_department({"department": "效能部"}, tech_departments=self.TECH))
+
+    def test_other_departments_do_not_match(self):
+        self.assertFalse(is_tech_department({"department": "运营1部"}, tech_departments=self.TECH))
 
 
 class AccountApplicationReasonTests(unittest.TestCase):
@@ -115,21 +154,21 @@ class AccountApplicationReasonTests(unittest.TestCase):
     CUTOVER = date(2026, 10, 1)
 
     def test_tech_department_always_qualifies(self):
-        row = {"department": "技术中心-研发部", "effective_date": date(2026, 1, 1)}
+        row = {"department": "效能部", "effective_date": date(2026, 1, 1)}
         reason = account_application_reason(
             row, date(2026, 9, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
         self.assertEqual(reason, "新人入职工作需要")
 
     def test_other_department_before_cutover_is_skipped(self):
-        row = {"department": "运营中心-运营1部", "effective_date": date(2026, 9, 1)}
+        row = {"department": "运营1部", "effective_date": date(2026, 9, 1)}
         reason = account_application_reason(
             row, date(2026, 9, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
         self.assertIsNone(reason)
 
     def test_other_department_on_or_after_cutover_qualifies(self):
-        row = {"department": "运营中心-运营1部", "effective_date": date(2026, 10, 1)}
+        row = {"department": "运营1部", "effective_date": date(2026, 10, 1)}
         reason = account_application_reason(
             row, date(2026, 10, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
@@ -137,18 +176,48 @@ class AccountApplicationReasonTests(unittest.TestCase):
 
 
 class BuildAccountApplicationTextTests(unittest.TestCase):
-    def test_uses_template_header_when_present(self):
-        row = {"name": "廖伊波", "department": "效能中心-效能部", "effective_date_raw": "2026-09-01"}
-        text = build_account_application_text(row, "新人入职工作需要", "【帐号申请模版】填写说明", today="2026-09-10")
-        self.assertTrue(text.startswith("【帐号申请模版】填写说明"))
-        self.assertIn("候选人姓名：廖伊波", text)
-        self.assertIn("申请理由：新人入职工作需要", text)
-        self.assertIn("申请日期：2026-09-10", text)
+    def test_tech_format_matches_real_example_structure(self):
+        row = {
+            "name": "廖伊波", "resume_name": "廖伊波", "org_unit": "效能中心",
+            "service_unit": "恒睿", "employee_code": "NX4325",
+            "personal_contact": "@heather80130",
+        }
+        text = build_account_application_text(
+            row, "新人入职工作需要", is_tech=True, today="2026-09-03"
+        )
+        self.assertTrue(text.startswith("【员工账号申请】"))
+        self.assertIn("申请日期：2026-09-03", text)
+        self.assertIn("编制组织：效能中心", text)
+        self.assertIn("服务单位：恒睿", text)
+        self.assertIn("编号：NX4325", text)
+        self.assertIn("花名：廖伊波", text)
+        self.assertIn("简历名：廖伊波", text)
+        self.assertIn("需求：TG×1", text)
+        self.assertIn("申请原因：新人入职工作需要", text)
+        self.assertIn("联系TG：@heather80130", text)
+        self.assertNotIn("申请数量", text)
 
-    def test_falls_back_to_default_header_when_template_missing(self):
-        row = {"name": "廖伊波", "department": "效能中心-效能部", "effective_date_raw": "2026-09-01"}
-        text = build_account_application_text(row, "新人入职工作需要", "", today="2026-09-10")
-        self.assertTrue(text.startswith("【员工帐号申请】"))
+    def test_other_format_matches_real_example_structure(self):
+        row = {
+            "name": "江亦白", "org_unit": "运营中心", "service_unit": "恒睿",
+            "department": "运营1部", "employee_code": "YY6342",
+            "personal_contact": "yibai7798",
+        }
+        text = build_account_application_text(
+            row, "新人入职满7天", is_tech=False, today="2026-09-02"
+        )
+        self.assertTrue(text.startswith("【员工工作帐号申请】"))
+        self.assertIn("编制组织：运营中心", text)
+        self.assertIn("服务公司：恒睿", text)
+        self.assertIn("部门：运营1部", text)
+        self.assertIn("花名：江亦白", text)
+        self.assertIn("员工编号：YY6342", text)
+        self.assertIn("需求：TG×1", text)
+        self.assertIn("申请原因：新人入职满7天", text)
+        self.assertIn("申请数量：1个", text)
+        self.assertIn("联系TG：@yibai7798", text)  # 自动补上@前缀
+        self.assertIn("申请日期：2026-09-02", text)
+        self.assertNotIn("简历名", text)
 
 
 if __name__ == "__main__":

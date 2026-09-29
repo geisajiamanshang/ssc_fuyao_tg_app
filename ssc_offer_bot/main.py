@@ -71,13 +71,13 @@ SSC Offer 审批流转自动化 主程序。
              （APPROVAL_CODES）那一套
 
   场景十一：SSC在自己的收藏夹发送"帐号申请"
-          -> 到Drive云端花名册文件夹读取"花名册"和"花名册（机器人）"两张
-             表（同名以"花名册"为准，冲突名单先提示收藏夹），筛出生效日期
-             距今>=6天且AD/AE两列仍不同（还没申请工作帐号）的人，按部门
-             套用理由（研发部/效能部固定"新人入职工作需要"；其他部门"新人
-             入职满7天"，仅对2026-10-1起生效的人生效），套用帐号申请助手
-             文件夹下的「帐号申请模版」分别生成【员工帐号申请】草稿发到
-             收藏夹
+          -> 读取"花名册"和"花名册（机器人）"两张在线Google表格（同名以
+             "花名册"为准，冲突名单先提示收藏夹），筛出生效日期距今>=6天、
+             且工作TG(AD列)仍等于私人联系方式(AE列)——说明工作TG还只是
+             占位、还没换成真正工作TG——的人，按部门套用理由和格式（研发部/
+             效能部固定"新人入职工作需要"，套【员工账号申请】格式；其他
+             部门"新人入职满7天"，仅对2026-10-1起生效的人生效，套【员工
+             工作帐号申请】格式）分别生成草稿发到收藏夹
           -> SSC发送111统一放行本轮全部草稿：逐条间隔随机5-10秒转发到
              工作帐号需求群-SSC3组，每条发送成功后立即删除对应收藏夹草稿
 
@@ -144,13 +144,14 @@ from account_request import (
     name_from_forward_sender_name,
 )
 from account_application import (
-    AccountApplicationDriveRepository,
+    AccountApplicationSheetsRepository,
     account_application_reason,
     build_account_application_text,
+    is_tech_department,
     merge_rosters,
     needs_account_application,
-    parse_roster_csv,
     parse_roster_date,
+    parse_roster_rows,
 )
 from offboarding import (
     OffboardingApprovalFormRepository,
@@ -221,9 +222,11 @@ offboarding_process_drive = OffboardingApprovalFormRepository(config.OFFBOARDING
 daily_sync_lock = asyncio.Lock()
 self_eval_lock = asyncio.Lock()
 account_application_lock = asyncio.Lock()
-account_application_drive = AccountApplicationDriveRepository(
-    config.ACCOUNT_APPLICATION_ROSTER_FOLDER_ID,
-    config.ACCOUNT_APPLICATION_ASSISTANT_FOLDER_ID,
+account_application_sheets = AccountApplicationSheetsRepository(
+    config.ACCOUNT_APPLICATION_ROSTER_SPREADSHEET_ID,
+    config.ACCOUNT_APPLICATION_ROSTER_SHEET_GID,
+    config.ACCOUNT_APPLICATION_ROSTER_BOT_SPREADSHEET_ID,
+    config.ACCOUNT_APPLICATION_ROSTER_BOT_SHEET_GID,
 )
 
 
@@ -718,15 +721,16 @@ async def on_ssc_self_eval_trigger(event):
 @client.on(events.NewMessage())
 async def on_ssc_account_application_trigger(event):
     """SSC在自己的收藏夹发"帐号申请"（ACCOUNT_APPLICATION_TRIGGER_KEYWORD），
-    触发：读取花名册Drive文件夹下"花名册"和"花名册（机器人）"两张表（同名
-    以"花名册"为准，冲突名单先发一条收藏夹提示），筛出生效日期距今>=6天且
-    AD/AE两列（工作帐号申请状态）仍不同、说明还没申请工作帐号的人，按部门
-    套用理由（研发部/效能部固定"新人入职工作需要"；其他部门"新人入职满7
-    天"，仅对2026-10-01起生效的人生效），套用帐号申请助手文件夹下的「帐号
-    申请模版」分别生成【员工帐号申请】草稿发到收藏夹。SSC统一发送
-    ACCOUNT_APPLICATION_APPROVAL_CODE（111/测试111）一次性放行全部草稿，
-    见on_ssc_account_application_release；这一步是发起新一轮生成，不是
-    释放某条已排队的草稿，所以不放进APPROVAL_CODES，用独立监听器单独识别。
+    触发：读取"花名册"和"花名册（机器人）"两张在线Google表格（同名以"花名
+    册"为准，冲突名单先发一条收藏夹提示），筛出生效日期距今>=6天、且工作TG
+    (AD列)仍等于私人联系方式(AE列)——说明工作TG还只是占位、还没换成真正
+    工作TG——的人，按部门套用理由和格式（研发部/效能部固定"新人入职工作
+    需要"，套【员工账号申请】格式；其他部门"新人入职满7天"，仅对
+    2026-10-01起生效的人生效，套【员工工作帐号申请】格式）分别生成草稿发到
+    收藏夹。SSC统一发送ACCOUNT_APPLICATION_APPROVAL_CODE（111/测试111）
+    一次性放行全部草稿，见on_ssc_account_application_release；这一步是
+    发起新一轮生成，不是释放某条已排队的草稿，所以不放进APPROVAL_CODES，
+    用独立监听器单独识别。
     """
     if event.chat_id in config.EXCLUDED_CHAT_IDS:
         return
@@ -739,7 +743,7 @@ async def on_ssc_account_application_trigger(event):
     if not config.ACCOUNT_APPLICATION_ENABLED:
         await client.send_message(
             reviewer.id,
-            "帐号申请自动化未启用：花名册/帐号申请助手 Drive文件夹ID、"
+            "帐号申请自动化未启用：花名册/花名册（机器人）两张在线表格的ID、"
             "工作帐号需求群-SSC3组(GROUP_ACCOUNT_REQUEST_WORK) 需要都配置"
             "好才会生效。",
             parse_mode=None,
@@ -747,32 +751,19 @@ async def on_ssc_account_application_trigger(event):
         return
     async with account_application_lock:
         try:
-            primary_csv, secondary_csv = await asyncio.to_thread(
-                account_application_drive.load_rosters
+            primary_raw_rows, secondary_raw_rows = await asyncio.to_thread(
+                account_application_sheets.load_rosters
             )
-            template_text = await asyncio.to_thread(account_application_drive.load_template)
         except Exception:
-            log.exception("[帐号申请] 读取花名册/模版失败，msg_id=%s", event.message.id)
+            log.exception("[帐号申请] 读取花名册失败，msg_id=%s", event.message.id)
             await client.send_message(
-                reviewer.id, "帐号申请自动化读取花名册或模版失败，请查看机器人日志。",
+                reviewer.id, "帐号申请自动化读取花名册失败，请查看机器人日志。",
                 parse_mode=None,
             )
             return
 
-        primary_rows = parse_roster_csv(
-            primary_csv,
-            name_col=config.ACCOUNT_APPLICATION_NAME_COLUMN,
-            date_col=config.ACCOUNT_APPLICATION_EFFECTIVE_DATE_COLUMN,
-            dept_col=config.ACCOUNT_APPLICATION_DEPARTMENT_COLUMN,
-            status_cols=config.ACCOUNT_APPLICATION_STATUS_COLUMNS,
-        )
-        secondary_rows = parse_roster_csv(
-            secondary_csv,
-            name_col=config.ACCOUNT_APPLICATION_NAME_COLUMN,
-            date_col=config.ACCOUNT_APPLICATION_EFFECTIVE_DATE_COLUMN,
-            dept_col=config.ACCOUNT_APPLICATION_DEPARTMENT_COLUMN,
-            status_cols=config.ACCOUNT_APPLICATION_STATUS_COLUMNS,
-        )
+        primary_rows = parse_roster_rows(primary_raw_rows)
+        secondary_rows = parse_roster_rows(secondary_raw_rows)
         merged, conflicts = merge_rosters(primary_rows, secondary_rows)
         if conflicts:
             await client.send_message(
@@ -803,8 +794,11 @@ async def on_ssc_account_application_trigger(event):
             )
             if reason is None:
                 continue
+            is_tech = is_tech_department(
+                row, tech_departments=config.ACCOUNT_APPLICATION_TECH_DEPARTMENTS
+            )
             draft_text = build_account_application_text(
-                row, reason, template_text, today=today.isoformat()
+                row, reason, is_tech=is_tech, today=today.isoformat()
             )
             await queue_group_message(
                 config.GROUP_ACCOUNT_REQUEST_WORK, draft_text,

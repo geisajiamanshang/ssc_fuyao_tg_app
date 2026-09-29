@@ -12,25 +12,36 @@ from zoneinfo import ZoneInfo
 from account_application import (
     account_application_reason,
     build_account_application_text,
+    is_tech_department,
     merge_rosters,
     needs_account_application,
-    parse_roster_csv,
     parse_roster_date,
+    parse_roster_rows,
 )
 from approval_queue import select_pending
 
 
-ROSTER_HEADER = ",".join(["header"] * 31)
+def roster_sheet_rows(*data_rows):
+    title_row = ["在职花名册"]
+    group_header_row = ["基础身份"]
+    field_header_row = ["序号", "员工编码（新）", "花名*", "姓名/简历名（选填）",
+                         "在职状态*", "生效日期（入/调）"]
+    return [title_row, group_header_row, field_header_row, *data_rows]
 
 
-def roster_row(name, effective_date, department, status_ad, status_ae):
+def data_row(*, employee_code="", name="", resume_name="", effective_date="",
+             org_unit="", service_unit="", department="", work_tg="", personal_contact=""):
     cells = ["" for _ in range(31)]
+    cells[1] = employee_code
     cells[2] = name
+    cells[3] = resume_name
     cells[5] = effective_date
+    cells[11] = org_unit
+    cells[13] = service_unit
     cells[14] = department
-    cells[29] = status_ad
-    cells[30] = status_ae
-    return ",".join(cells)
+    cells[29] = work_tg
+    cells[30] = personal_contact
+    return cells
 
 
 class MemoryStore:
@@ -50,16 +61,29 @@ class MemoryStore:
         return self.data
 
 
+class FakeDateTime:
+    """冻结 on_ssc_account_application_trigger 里 datetime.now(...).date() 用到
+    的"今天"，避免测试结果随容器实际时钟漂移（生效日期筛选依赖"今天"）。
+    datetime.strptime 原样转发给真正的 datetime，因为解析cutover日期字符串
+    不需要冻结。
+    """
+    _fixed_now = datetime(2026, 10, 10, 12, 0, 0)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls._fixed_now.replace(tzinfo=tz) if tz is not None else cls._fixed_now
+
+    @staticmethod
+    def strptime(date_string, fmt):
+        return datetime.strptime(date_string, fmt)
+
+
 def base_config(**overrides):
     fields = dict(
         EXCLUDED_CHAT_IDS=frozenset(),
         ACCOUNT_APPLICATION_ENABLED=True,
         ACCOUNT_APPLICATION_TRIGGER_KEYWORD="帐号申请",
         ACCOUNT_APPLICATION_APPROVAL_CODE="测试111",
-        ACCOUNT_APPLICATION_NAME_COLUMN="C",
-        ACCOUNT_APPLICATION_EFFECTIVE_DATE_COLUMN="F",
-        ACCOUNT_APPLICATION_DEPARTMENT_COLUMN="O",
-        ACCOUNT_APPLICATION_STATUS_COLUMNS=("AD", "AE"),
         ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE=6,
         ACCOUNT_APPLICATION_TECH_DEPARTMENTS=("研发部", "效能部"),
         ACCOUNT_APPLICATION_OTHER_REASON_CUTOVER_DATE="2026-10-01",
@@ -73,8 +97,7 @@ def base_config(**overrides):
     return NS(**fields)
 
 
-def build_env(*, primary_csv, secondary_csv, template_text="【帐号申请模版】", load_error=None,
-              today=None, **overrides):
+def build_env(*, primary_rows, secondary_rows, load_error=None, **overrides):
     source = ast.parse(Path(__file__).with_name('main.py').read_text())
     functions = [n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
                  and n.name in {'on_ssc_account_application_trigger',
@@ -94,10 +117,7 @@ def build_env(*, primary_csv, secondary_csv, template_text="【帐号申请模�
     def load_rosters():
         if load_error:
             raise load_error
-        return primary_csv, secondary_csv
-
-    def load_template():
-        return template_text
+        return primary_rows, secondary_rows
 
     client = NS(
         get_me=AsyncMock(return_value=me),
@@ -109,17 +129,18 @@ def build_env(*, primary_csv, secondary_csv, template_text="【帐号申请模�
     env = dict(
         account_application_reason=account_application_reason,
         build_account_application_text=build_account_application_text,
+        is_tech_department=is_tech_department,
         merge_rosters=merge_rosters,
         needs_account_application=needs_account_application,
-        parse_roster_csv=parse_roster_csv,
         parse_roster_date=parse_roster_date,
+        parse_roster_rows=parse_roster_rows,
         select_pending=select_pending,
-        asyncio=asyncio, random=random, datetime=datetime, ZoneInfo=ZoneInfo,
+        asyncio=asyncio, random=random, datetime=FakeDateTime, ZoneInfo=ZoneInfo,
         log=logging.getLogger('test'),
         client=client,
         outbox=MemoryStore(), state=MemoryStore(),
         ssc_send_lock=asyncio.Lock(), account_application_lock=asyncio.Lock(),
-        account_application_drive=NS(load_rosters=load_rosters, load_template=load_template),
+        account_application_sheets=NS(load_rosters=load_rosters),
         config=base_config(),
     )
     env.update(overrides)
@@ -136,23 +157,29 @@ def fav_event(text, msg_id=1):
 
 class AccountApplicationTriggerTests(IsolatedAsyncioTestCase):
     def setUp(self):
-        self.primary_csv = "\n".join([
-            ROSTER_HEADER,
-            roster_row("廖伊波", "2026-09-01", "效能中心-效能部", "已申请", "未申请"),
-            roster_row("张三", "2026-09-05", "运营中心-运营1部", "已申请", "未申请"),
-        ])
-        self.secondary_csv = "\n".join([ROSTER_HEADER])
+        # 冻结"今天"=2026-10-10（见FakeDateTime）。
+        # 廖伊波：效能部，生效日期够久，AD==AE（还没申请）→ 应该生成【员工账号申请】草稿。
+        # 张三：运营1部，生效日期在cutover(2026-10-01)之前 → 按理由判断跳过。
+        self.primary_rows = roster_sheet_rows(
+            data_row(employee_code="NX4325", name="廖伊波", resume_name="廖伊波",
+                     effective_date="2026-09-01", org_unit="效能中心",
+                     service_unit="恒睿", department="效能部",
+                     work_tg="@heather80130", personal_contact="@heather80130"),
+            data_row(employee_code="YY0001", name="张三", effective_date="2026-09-20",
+                     org_unit="运营中心", service_unit="恒睿", department="运营1部",
+                     work_tg="@x", personal_contact="@x"),
+        )
+        self.secondary_rows = roster_sheet_rows()
 
     async def test_generates_one_draft_per_qualifying_candidate(self):
-        # 廖伊波（研发部/效能部）符合条件；张三（其他部门、生效日期在
-        # 2026-10-1之前）不符合cutover日期，本轮不处理。
-        env = build_env(primary_csv=self.primary_csv, secondary_csv=self.secondary_csv)
+        env = build_env(primary_rows=self.primary_rows, secondary_rows=self.secondary_rows)
         await env['on_ssc_account_application_trigger'](fav_event('帐号申请'))
 
         drafts = [t for d, t, _f in env['_sent'] if d == 9]
         self.assertEqual(len(drafts), 1)
-        self.assertIn('候选人姓名：廖伊波', drafts[0])
-        self.assertIn('新人入职工作需要', drafts[0])
+        self.assertTrue(drafts[0].startswith('【员工账号申请】'))
+        self.assertIn('花名：廖伊波', drafts[0])
+        self.assertIn('申请原因：新人入职工作需要', drafts[0])
         self.assertNotIn('张三', drafts[0])
 
         records = [r for r in env['outbox'].all().values() if r['kind'] == 'account_application']
@@ -160,42 +187,66 @@ class AccountApplicationTriggerTests(IsolatedAsyncioTestCase):
         self.assertEqual(records[0]['destination'], -5309896717)
         self.assertEqual(records[0]['approval_code'], '测试111')
 
+    async def test_already_applied_candidate_is_not_queued(self):
+        rows = roster_sheet_rows(
+            data_row(name="范谦和", effective_date="2026-09-01", department="效能部",
+                     work_tg="@fanqianhe1108", personal_contact="@fanqianhe123"),
+        )
+        env = build_env(primary_rows=rows, secondary_rows=self.secondary_rows)
+        await env['on_ssc_account_application_trigger'](fav_event('帐号申请'))
+        self.assertEqual(len(env['_sent']), 1)
+        self.assertIn('没有找到需要处理的人', env['_sent'][0][1])
+
+    async def test_other_department_uses_different_format(self):
+        rows = roster_sheet_rows(
+            data_row(name="江亦白", effective_date="2026-10-01", department="运营1部",
+                     org_unit="运营中心", service_unit="恒睿", employee_code="YY6342",
+                     work_tg="@yibai7798", personal_contact="@yibai7798"),
+        )
+        env = build_env(primary_rows=rows, secondary_rows=self.secondary_rows)
+        await env['on_ssc_account_application_trigger'](fav_event('帐号申请'))
+        drafts = [t for d, t, _f in env['_sent'] if d == 9]
+        self.assertEqual(len(drafts), 1)
+        self.assertTrue(drafts[0].startswith('【员工工作帐号申请】'))
+        self.assertIn('申请原因：新人入职满7天', drafts[0])
+        self.assertIn('申请数量：1个', drafts[0])
+
     async def test_duplicate_name_across_sheets_prefers_primary_and_notifies(self):
-        secondary_with_dup = "\n".join([
-            ROSTER_HEADER,
-            roster_row("廖伊波", "2020-01-01", "机器人来源部门", "x", "x"),
-        ])
-        env = build_env(primary_csv=self.primary_csv, secondary_csv=secondary_with_dup)
+        secondary_with_dup = roster_sheet_rows(
+            data_row(name="廖伊波", effective_date="2020-01-01", department="别的部门",
+                     work_tg="x", personal_contact="y"),
+        )
+        env = build_env(primary_rows=self.primary_rows, secondary_rows=secondary_with_dup)
         await env['on_ssc_account_application_trigger'](fav_event('帐号申请'))
         notices = [t for d, t, _f in env['_sent'] if d == 9 and '重复' in t]
         self.assertEqual(len(notices), 1)
         self.assertIn('廖伊波', notices[0])
 
     async def test_disabled_reports_to_favorites(self):
-        env = build_env(primary_csv=self.primary_csv, secondary_csv=self.secondary_csv,
+        env = build_env(primary_rows=self.primary_rows, secondary_rows=self.secondary_rows,
                         config=base_config(ACCOUNT_APPLICATION_ENABLED=False))
         await env['on_ssc_account_application_trigger'](fav_event('帐号申请'))
         self.assertEqual(len(env['_sent']), 1)
         self.assertIn('未启用', env['_sent'][0][1])
 
     async def test_no_keyword_is_ignored(self):
-        env = build_env(primary_csv=self.primary_csv, secondary_csv=self.secondary_csv)
+        env = build_env(primary_rows=self.primary_rows, secondary_rows=self.secondary_rows)
         await env['on_ssc_account_application_trigger'](fav_event('今天天气不错'))
         self.assertEqual(env['_sent'], [])
 
     async def test_drive_load_failure_reports_to_favorites(self):
-        env = build_env(primary_csv=self.primary_csv, secondary_csv=self.secondary_csv,
+        env = build_env(primary_rows=self.primary_rows, secondary_rows=self.secondary_rows,
                         load_error=FileNotFoundError('未找到'))
         await env['on_ssc_account_application_trigger'](fav_event('帐号申请'))
         self.assertEqual(len(env['_sent']), 1)
         self.assertIn('失败', env['_sent'][0][1])
 
     async def test_no_qualifying_candidate_reports_to_favorites(self):
-        csv_text = "\n".join([
-            ROSTER_HEADER,
-            roster_row("李四", "2026-09-08", "运营中心-运营1部", "已申请", "已申请"),
-        ])
-        env = build_env(primary_csv=csv_text, secondary_csv=self.secondary_csv)
+        rows = roster_sheet_rows(
+            data_row(name="李四", effective_date="2026-09-20", department="运营1部",
+                     work_tg="@a", personal_contact="@b"),
+        )
+        env = build_env(primary_rows=rows, secondary_rows=self.secondary_rows)
         await env['on_ssc_account_application_trigger'](fav_event('帐号申请'))
         self.assertEqual(len(env['_sent']), 1)
         self.assertIn('没有找到需要处理的人', env['_sent'][0][1])
@@ -216,38 +267,38 @@ class AccountApplicationReleaseTests(IsolatedAsyncioTestCase):
             'approval_code': '测试111',
         })
 
+    def _no_sleep_env(self, env):
+        import types
+        fake_asyncio = types.SimpleNamespace(**{k: getattr(asyncio, k) for k in dir(asyncio) if not k.startswith('_')})
+
+        async def fake_sleep(seconds):
+            env.setdefault('_slept', []).append(seconds)
+
+        fake_asyncio.sleep = fake_sleep
+        env['asyncio'] = fake_asyncio
+        return env
+
     async def test_releases_all_pending_drafts_in_order_and_deletes_each(self):
-        env = build_env(primary_csv="", secondary_csv="")
+        env = build_env(primary_rows=[], secondary_rows=[])
         await self._seed_two_pending_drafts(env)
         env['_client'].get_messages = AsyncMock(side_effect=[
             NS(id=100, raw_text='草稿A', media=None),
             NS(id=101, raw_text='草稿B', media=None),
         ])
-        # 避免测试真的等5-10秒。
-        env['asyncio'] = asyncio
-        orig_sleep = asyncio.sleep
-        slept = []
-
-        async def fake_sleep(seconds):
-            slept.append(seconds)
-
         env['random'] = NS(uniform=lambda a, b: 7)
-        import types
-        fake_asyncio = types.SimpleNamespace(**{k: getattr(asyncio, k) for k in dir(asyncio) if not k.startswith('_')})
-        fake_asyncio.sleep = fake_sleep
-        env['asyncio'] = fake_asyncio
+        env = self._no_sleep_env(env)
 
         await env['on_ssc_account_application_release'](fav_event('测试111', msg_id=2000))
 
         forwarded = [t for d, t, _f in env['_sent'] if d == -5309896717]
         self.assertEqual(forwarded, ['草稿A', '草稿B'])
-        self.assertEqual(slept, [7])  # 只在两条之间等一次，不在最后一条之后等
+        self.assertEqual(env.get('_slept', []), [7])
         self.assertEqual(env['_client'].delete_messages.await_count, 2)
         statuses = {r['draft_id']: r['status'] for r in env['outbox'].all().values()}
         self.assertEqual(statuses, {100: 'sent', 101: 'sent'})
 
     async def test_wrong_code_does_not_release(self):
-        env = build_env(primary_csv="", secondary_csv="")
+        env = build_env(primary_rows=[], secondary_rows=[])
         await self._seed_two_pending_drafts(env)
         await env['on_ssc_account_application_release'](fav_event('测试1', msg_id=2000))
         self.assertEqual(env['_sent'], [])
@@ -255,25 +306,18 @@ class AccountApplicationReleaseTests(IsolatedAsyncioTestCase):
         self.assertEqual(statuses, {'pending'})
 
     async def test_no_pending_drafts_is_silent(self):
-        env = build_env(primary_csv="", secondary_csv="")
+        env = build_env(primary_rows=[], secondary_rows=[])
         await env['on_ssc_account_application_release'](fav_event('测试111', msg_id=2000))
         self.assertEqual(env['_sent'], [])
 
     async def test_empty_draft_marked_failed_and_does_not_block_others(self):
-        env = build_env(primary_csv="", secondary_csv="")
+        env = build_env(primary_rows=[], secondary_rows=[])
         await self._seed_two_pending_drafts(env)
         env['_client'].get_messages = AsyncMock(side_effect=[
             NS(id=100, raw_text='', media=None),
             NS(id=101, raw_text='草稿B', media=None),
         ])
-        import types
-        fake_asyncio = types.SimpleNamespace(**{k: getattr(asyncio, k) for k in dir(asyncio) if not k.startswith('_')})
-
-        async def fake_sleep(seconds):
-            return None
-
-        fake_asyncio.sleep = fake_sleep
-        env['asyncio'] = fake_asyncio
+        env = self._no_sleep_env(env)
 
         await env['on_ssc_account_application_release'](fav_event('测试111', msg_id=2000))
         forwarded = [t for d, t, _f in env['_sent'] if d == -5309896717]

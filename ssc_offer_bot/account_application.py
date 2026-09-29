@@ -1,22 +1,39 @@
 # -*- coding: utf-8 -*-
-"""帐号申请自动化：SSC收藏夹出现"帐号申请"后，扫描Drive花名册文件夹下
-"花名册"和"花名册（机器人）"两张表，找出已生效满一定天数但仍未申请工作
-帐号的人，按部门套用不同理由，套用"帐号申请助手"文件夹下的「帐号申请
-模版」分别生成【员工帐号申请】草稿。
+"""帐号申请自动化：SSC收藏夹出现"帐号申请"后，读取"花名册"和"花名册（机器
+人）"两张在线Google表格，找出已生效满一定天数、但工作TG(AD列)仍等于私人
+联系方式(AE列)——也就是工作TG还只是占位、还没换成真正工作TG——的人，按
+部门套用不同理由和不同的消息格式，分别生成账号申请草稿。
 
-纯逻辑（CSV解析/合并/筛选/理由判断/文案拼装）单独放在这里，不涉及
-Telegram调用，方便独立测试；Drive读取复用 daily_reports 的会话/下载
-机制（服务账号或API key，只需要 drive.readonly 权限），用CSV导出而不是
-Sheets API v4读取花名册两张表，避免额外申请 spreadsheets.readonly 权限。
+纯逻辑（两表合并/筛选/理由判断/文案拼装）单独放在这里，不涉及Telegram
+调用，方便独立测试；Drive/Sheets读取复用service_account凭证，只是比
+daily_reports.py里其它功能用的drive.readonly多加了spreadsheets.readonly
+这一个权限范围（读取指定gid对应的分页，需要Sheets API v4，Drive的CSV
+导出接口不支持按gid选分页）。
+
+两种消息格式照抄"帐号申请助手/模版.rtf"里对应部门类型的真实历史例子：
+研发部/效能部用【员工账号申请】格式，其他部门用【员工工作帐号申请】格式，
+"申请原因"按account_application_reason()的判断结果填入，不是照抄例子里的
+原文。
 """
 
-import csv
-import io
 from datetime import datetime
 
-from daily_reports import DRIVE_FILES_URL, _drive_session
+# 花名册两张表的字段位置（电子表格列字母），两表结构完全一致：正文表头在
+# 第3行（前两行是"在职花名册"标题行和分组表头），从第4行开始是数据。
+ROSTER_HEADER_ROW_INDEX = 2  # 0-based：第3行
+ROSTER_DATA_START_INDEX = 3  # 0-based：第4行开始是数据
 
-NATIVE_SHEET_MIME_TYPE = "application/vnd.google-apps.spreadsheet"
+ROSTER_FIELD_COLUMNS = {
+    "employee_code": "B",   # 员工编码（新）
+    "name": "C",             # 花名*
+    "resume_name": "D",      # 姓名/简历名（选填）
+    "effective_date_raw": "F",  # 生效日期（入/调）
+    "org_unit": "L",         # 编制组织*（运营中心/技术中心/效能中心……）
+    "service_unit": "N",     # 服务单位*（一般是"恒睿"）
+    "department": "O",       # 部门*（研发部/效能部/运营1部……）
+    "work_tg": "AD",         # 工作TG
+    "personal_contact": "AE",  # 私人联系方式（选填）
+}
 
 # 花名册生效日期列可能被Sheets渲染成这几种常见格式，都尝试一遍；都不匹配
 # 就返回None，由调用方把这一行标记为跳过，而不是让整个批次因为一行格式
@@ -45,31 +62,27 @@ def parse_roster_date(raw):
     return None
 
 
-def parse_roster_csv(csv_text, *, name_col, date_col, dept_col, status_cols):
-    """把花名册CSV正文解析成候选人字典列表：跳过表头行(第一行)和姓名为空
-    的行。列位置用电子表格列字母指定(如"C" "F" "O" "AD")而不依赖表头文字，
-    因为"花名册"和"花名册（机器人）"两张表的表头未必完全一致。
-    """
-    name_idx = _col_index(name_col)
-    date_idx = _col_index(date_col)
-    dept_idx = _col_index(dept_col)
-    status_idx = [_col_index(c) for c in status_cols]
-    max_idx = max([name_idx, date_idx, dept_idx, *status_idx])
+def _cell(row, index):
+    if index >= len(row):
+        return ""
+    value = row[index]
+    return value.strip() if isinstance(value, str) else ("" if value is None else str(value))
 
-    rows = list(csv.reader(io.StringIO(csv_text or "")))
+
+def parse_roster_rows(rows, *, columns=ROSTER_FIELD_COLUMNS,
+                       data_start_index=ROSTER_DATA_START_INDEX):
+    """把Sheets API返回的行列表（每行是单元格值的list）解析成候选人字典
+    列表：跳过标题/分组表头/字段表头这几行，姓名为空的行也跳过。列位置用
+    电子表格列字母指定，不依赖表头文字，因为两张表的表头未必逐字一致。
+    """
+    col_indexes = {field: _col_index(letter) for field, letter in columns.items()}
     candidates = []
-    for row in rows[1:]:
-        if len(row) <= max_idx:
-            continue
-        name = row[name_idx].strip()
+    for row in rows[data_start_index:]:
+        name = _cell(row, col_indexes["name"])
         if not name:
             continue
-        candidates.append({
-            "name": name,
-            "effective_date_raw": row[date_idx].strip(),
-            "department": row[dept_idx].strip(),
-            "status_values": [row[i].strip() for i in status_idx],
-        })
+        candidate = {field: _cell(row, idx) for field, idx in col_indexes.items()}
+        candidates.append(candidate)
     return candidates
 
 
@@ -87,18 +100,28 @@ def merge_rosters(primary_rows, secondary_rows):
 
 
 def needs_account_application(candidate, today, *, min_days=6):
-    """生效日期与今日相差>=min_days天，且两个状态列(AD/AE)的值不同，说明
-    还没申请工作帐号。生效日期解析失败或状态列不全的行一律跳过。
+    """生效日期与今日相差>=min_days天，且工作TG(AD)等于私人联系方式(AE)、
+    两者都不为空——说明工作TG目前只是私人联系方式的占位，还没换成真正的
+    工作TG，需要申请。生效日期解析失败、或AD/AE有一个是空的（数据不全，
+    不是"还没申请"这个状态本身）一律跳过。
     """
     effective = candidate.get("effective_date")
     if effective is None:
         return False
     if (today - effective).days < min_days:
         return False
-    values = candidate.get("status_values") or []
-    if len(values) < 2:
+    work_tg = (candidate.get("work_tg") or "").strip()
+    personal_contact = (candidate.get("personal_contact") or "").strip()
+    if not work_tg or not personal_contact:
         return False
-    return values[0] != values[1]
+    return work_tg == personal_contact
+
+
+def is_tech_department(candidate, *, tech_departments):
+    """O列（部门）包含"研发部"或"效能部"，对应"技术中心/效能中心模版"这一
+    档；其余部门对应"运营中心模版"这一档。"""
+    department = candidate.get("department") or ""
+    return any(keyword in department for keyword in tech_departments)
 
 
 def account_application_reason(candidate, today, *, tech_departments, cutover_date):
@@ -107,8 +130,7 @@ def account_application_reason(candidate, today, *, tech_departments, cutover_da
     处理（其他部门、生效日期早于cutover_date的历史存量不在本次自动化范围
     内）。
     """
-    department = candidate.get("department") or ""
-    if any(keyword in department for keyword in tech_departments):
+    if is_tech_department(candidate, tech_departments=tech_departments):
         return "新人入职工作需要"
     effective = candidate.get("effective_date")
     if effective is None or effective < cutover_date:
@@ -116,117 +138,127 @@ def account_application_reason(candidate, today, *, tech_departments, cutover_da
     return "新人入职满7天"
 
 
-def build_account_application_text(candidate, reason, template_text, today=None):
-    """把"帐号申请模版"文档原文（原样保留，不猜测占位符写法）和这个人的
-    具体字段拼在一起；模版读取失败/为空时退化为固定表头，不影响草稿生成。
+def _contact_tg(candidate):
+    contact = (candidate.get("personal_contact") or "").strip()
+    if not contact:
+        return "待补充"
+    return contact if contact.startswith("@") else "@" + contact.lstrip("@")
+
+
+def build_account_application_text(candidate, reason, *, is_tech, today=None):
+    """按"帐号申请助手/模版.rtf"里对应部门类型的真实格式拼草稿文本：
+    研发部/效能部用【员工账号申请】格式（申请日期在最前面，多一个"简历名"
+    字段）；其他部门用【员工工作帐号申请】格式（多一个"申请数量"字段，
+    申请日期在最后）。"需求"统一填"TG×1"，因为这个自动化本身就是在补
+    工作TG这一项；"申请原因"用account_application_reason()的判断结果，
+    不是照抄模版例子里的原文。
     """
     today = today or datetime.now().date().isoformat()
-    header = (template_text or "").strip()
-    body = (
-        f"候选人姓名：{candidate.get('name') or '待补充'}\n"
-        f"部门：{candidate.get('department') or '待补充'}\n"
-        f"生效日期：{candidate.get('effective_date_raw') or '待补充'}\n"
-        f"申请日期：{today}\n"
-        f"申请理由：{reason}"
+    org_unit = candidate.get("org_unit") or "待补充"
+    service_unit = candidate.get("service_unit") or "恒睿"
+    department = candidate.get("department") or "待补充"
+    name = candidate.get("name") or "待补充"
+    resume_name = candidate.get("resume_name") or name
+    employee_code = candidate.get("employee_code") or "待补充"
+    contact_tg = _contact_tg(candidate)
+
+    if is_tech:
+        return (
+            "【员工账号申请】\n\n"
+            f"申请日期：{today}\n"
+            f"编制组织：{org_unit}\n"
+            f"服务单位：{service_unit}\n"
+            f"编号：{employee_code}\n"
+            f"花名：{name}\n"
+            f"简历名：{resume_name}\n"
+            "需求：TG×1\n"
+            f"申请原因：{reason}\n"
+            f"联系TG：{contact_tg}"
+        )
+    return (
+        "【员工工作帐号申请】\n\n"
+        f"编制组织：{org_unit}\n"
+        f"服务公司：{service_unit}\n"
+        f"部门：{department}\n"
+        f"花名：{name}\n"
+        f"员工编号：{employee_code}\n"
+        "需求：TG×1\n"
+        f"申请原因：{reason}\n"
+        "申请数量：1个\n"
+        f"联系TG：{contact_tg}\n"
+        f"申请日期：{today}"
     )
-    if header:
-        return header + "\n\n" + body
-    return "【员工帐号申请】\n\n" + body
 
 
-class AccountApplicationDriveRepository:
-    """花名册两张表(CSV导出)+帐号申请助手文件夹("步骤""帐号申请模版")的
-    Drive读取，复用 daily_reports 的Drive会话/下载机制。
+SHEETS_SCOPES = (
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+)
+
+
+class AccountApplicationSheetsRepository:
+    """"花名册"/"花名册（机器人）"两张在线Google表格的读取：按配置好的
+    spreadsheet_id+gid精确定位分页（哪怕分页被改名也能找到），用Sheets
+    API v4读取整页数据。
     """
 
-    def __init__(self, roster_folder_id, assistant_folder_id):
-        self.roster_folder_id = roster_folder_id
-        self.assistant_folder_id = assistant_folder_id
+    def __init__(self, roster_spreadsheet_id, roster_gid,
+                 roster_bot_spreadsheet_id, roster_bot_gid):
+        self.roster_spreadsheet_id = roster_spreadsheet_id
+        self.roster_gid = roster_gid
+        self.roster_bot_spreadsheet_id = roster_bot_spreadsheet_id
+        self.roster_bot_gid = roster_bot_gid
 
     @staticmethod
-    def _escape_query(value):
-        return (value or "").replace("\\", "\\\\").replace("'", "\\'")
+    def _session():
+        import os
+
+        credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+        if not credentials_path:
+            raise RuntimeError(
+                "未配置 GOOGLE_APPLICATION_CREDENTIALS：读取花名册在线表格"
+                "需要服务账号凭证（Sheets API不支持仅用API key访问私有表格）"
+            )
+        from google.auth.transport.requests import AuthorizedSession
+        from google.oauth2 import service_account
+
+        credentials = service_account.Credentials.from_service_account_file(
+            credentials_path, scopes=list(SHEETS_SCOPES)
+        )
+        return AuthorizedSession(credentials)
+
+    @staticmethod
+    def _resolve_sheet_title(session, spreadsheet_id, gid):
+        url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}"
+        response = session.get(url, params={"fields": "sheets.properties"}, timeout=30)
+        response.raise_for_status()
+        for sheet in response.json().get("sheets", []):
+            props = sheet.get("properties", {})
+            if props.get("sheetId") == gid:
+                return props["title"]
+        raise FileNotFoundError(
+            f"表格{spreadsheet_id}里没有找到gid={gid}对应的分页，"
+            "可能分页被删除或gid配置错了"
+        )
 
     @classmethod
-    def _list_children(cls, session, auth_params, folder_id):
-        params = {
-            **auth_params,
-            "q": f"'{cls._escape_query(folder_id)}' in parents and trashed = false",
-            "fields": "files(id,name,mimeType,modifiedTime)",
-            "orderBy": "modifiedTime desc",
-            "pageSize": 100,
-            "supportsAllDrives": "true",
-            "includeItemsFromAllDrives": "true",
-        }
-        response = session.get(DRIVE_FILES_URL, params=params, timeout=30)
-        response.raise_for_status()
-        return response.json().get("files", [])
-
-    @staticmethod
-    def _download_csv(session, auth_params, drive_file):
-        """花名册需要是Google表格(mimeType为原生表格)才能用export导出CSV；
-        如果是上传的xlsx等文件，明确报错而不是让Drive API返回的403看起来
-        像别的问题。
-        """
-        mime_type = drive_file.get("mimeType", "")
-        if mime_type != NATIVE_SHEET_MIME_TYPE:
-            raise ValueError(
-                f"「{drive_file.get('name')}」不是Google表格"
-                f"(mimeType={mime_type or '未知'})，暂不支持读取，"
-                "请转换成Google表格格式后重试"
-            )
-        url = f"{DRIVE_FILES_URL}/{drive_file['id']}/export"
-        response = session.get(
-            url, params={**auth_params, "mimeType": "text/csv"}, timeout=60
+    def _fetch_rows(cls, session, spreadsheet_id, gid):
+        sheet_title = cls._resolve_sheet_title(session, spreadsheet_id, gid)
+        escaped_title = sheet_title.replace("'", "''")
+        url = (
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}"
+            f"/values/'{escaped_title}'!A1:AZ5000"
         )
+        response = session.get(url, timeout=60)
         response.raise_for_status()
-        return response.content.decode("utf-8-sig")
-
-    @staticmethod
-    def _download_text(session, auth_params, drive_file):
-        """"步骤"/"帐号申请模版"多半是Google文档，也兼容万一是普通TXT。"""
-        mime_type = drive_file.get("mimeType", "")
-        if mime_type.startswith("application/vnd.google-apps"):
-            url = f"{DRIVE_FILES_URL}/{drive_file['id']}/export"
-            params = {**auth_params, "mimeType": "text/plain"}
-        else:
-            url = f"{DRIVE_FILES_URL}/{drive_file['id']}"
-            params = {**auth_params, "alt": "media"}
-        response = session.get(url, params=params, timeout=60)
-        response.raise_for_status()
-        raw = response.content
-        encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
-        return raw.decode(encoding)
+        return response.json().get("values", [])
 
     def load_rosters(self):
-        """返回 ("花名册"CSV正文, "花名册（机器人）"CSV正文)；任一张表在
-        文件夹里找不到时抛FileNotFoundError，由调用方汇报给SSC。
-        """
-        session, auth_params = _drive_session()
-        children = self._list_children(session, auth_params, self.roster_folder_id)
-        primary_file = next(
-            (item for item in children if item.get("name", "").strip() == "花名册"), None
+        """返回 ("花名册"的行列表, "花名册（机器人）"的行列表)，每行是单元
+        格值的list（Sheets API原样返回，行尾空单元格会被省略）。"""
+        session = self._session()
+        primary_rows = self._fetch_rows(session, self.roster_spreadsheet_id, self.roster_gid)
+        secondary_rows = self._fetch_rows(
+            session, self.roster_bot_spreadsheet_id, self.roster_bot_gid
         )
-        secondary_file = next(
-            (item for item in children
-             if "花名册" in item.get("name", "") and "机器人" in item.get("name", "")),
-            None,
-        )
-        if not primary_file:
-            raise FileNotFoundError("未在花名册文件夹中找到名为「花名册」的表")
-        if not secondary_file:
-            raise FileNotFoundError("未在花名册文件夹中找到名为「花名册（机器人）」的表")
-        primary_csv = self._download_csv(session, auth_params, primary_file)
-        secondary_csv = self._download_csv(session, auth_params, secondary_file)
-        return primary_csv, secondary_csv
-
-    def load_template(self):
-        """帐号申请助手文件夹下查找文件名包含"帐号申请模版"的文档全文。"""
-        session, auth_params = _drive_session()
-        children = self._list_children(session, auth_params, self.assistant_folder_id)
-        drive_file = next(
-            (item for item in children if "帐号申请模版" in item.get("name", "")), None
-        )
-        if not drive_file:
-            raise FileNotFoundError("未在帐号申请助手文件夹中找到「帐号申请模版」")
-        return self._download_text(session, auth_params, drive_file)
+        return primary_rows, secondary_rows

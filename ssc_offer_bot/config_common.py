@@ -135,28 +135,42 @@ ONEHR_LOGIN_CODE = os.environ.get("ONEHR_LOGIN_CODE", "").strip()
 ONEHR_LOGIN_PASSWORD = os.environ.get("ONEHR_LOGIN_PASSWORD", "").strip()
 
 # ========== 帐号申请自动化 ==========
-# SSC收藏夹出现"帐号申请"关键词后，扫描花名册Drive文件夹下"花名册"和
-# "花名册（机器人）"两张表（同名以"花名册"为准，冲突名单会先发一条收藏夹
-# 提示），筛出生效日期距今>=6天且AD/AE两列（工作帐号申请状态）仍不同的
-# 人，套用帐号申请助手文件夹下的「帐号申请模版」分别生成【员工帐号申请】
-# 草稿发到收藏夹；SSC统一发送111放行，逐条间隔随机5-10秒转发到工作帐号
-# 需求群-SSC3组（复用现有的GROUP_ACCOUNT_REQUEST_WORK），每条发送成功后
-# 立即删除对应收藏夹草稿。
+# SSC收藏夹出现"帐号申请"关键词后，读取"花名册"和"花名册（机器人）"两张
+# 在线Google表格（真实地址记在花名册Drive文件夹里的"共享资源地址.rtf"，
+# 不是文件夹本身直接放着这两张表，所以这里直接记录解析出来的表格ID/分页
+# gid，不依赖每次现读那份说明文件），筛出生效日期距今>=6天、且AD列(工作
+# TG)等于AE列(私人联系方式)——即工作TG仍是占位、还没换成真正工作TG——的
+# 人；同名以"花名册"为准，重复名单会先发一条收藏夹提示。按O列部门套理由：
+# 研发部/效能部固定"新人入职工作需要"，套用【员工账号申请】格式；其他部门
+# "新人入职满7天"（仅对2026-10-1起生效的人生效），套用【员工工作帐号申请】
+# 格式——两种格式都是照抄"帐号申请助手/模版.rtf"里对应部门的真实历史例子，
+# 见account_application.py。生成的草稿分别发到收藏夹；SSC统一发送111放行，
+# 逐条间隔随机5-10秒转发到工作帐号需求群-SSC3组（复用现有的
+# GROUP_ACCOUNT_REQUEST_WORK），每条发送成功后立即删除对应收藏夹草稿。
+#
+# 读取这两张表需要Sheets API v4（按gid精确定位分页，Drive的CSV导出接口
+# 不支持选分页），除了服务账号已有的drive.readonly，还需要额外申请
+# spreadsheets.readonly这个权限范围，并在服务账号所在的Google Cloud项目
+# 里启用"Google Sheets API"（一次性设置，去Cloud Console的"API和服务→库"
+# 搜索启用）；这两张表本身也需要单独分享给服务账号邮箱（跟分享Drive文件夹
+# 是两回事）。
 ACCOUNT_APPLICATION_TRIGGER_KEYWORD = "帐号申请"
-# 花名册所在Drive文件夹：https://drive.google.com/drive/u/1/folders/1_-K1NqqGhLEvr8kVBdheCsbIHoT_cFsV
-ACCOUNT_APPLICATION_ROSTER_FOLDER_ID = os.environ.get(
-    "ACCOUNT_APPLICATION_ROSTER_FOLDER_ID", "1_-K1NqqGhLEvr8kVBdheCsbIHoT_cFsV"
+# 花名册：https://docs.google.com/spreadsheets/d/1DgnePrJOwA0sa8v4wJbv3RjFmdXvhGVN9f1TrTuzJng/edit?gid=139264850
+ACCOUNT_APPLICATION_ROSTER_SPREADSHEET_ID = os.environ.get(
+    "ACCOUNT_APPLICATION_ROSTER_SPREADSHEET_ID",
+    "1DgnePrJOwA0sa8v4wJbv3RjFmdXvhGVN9f1TrTuzJng",
 )
-# 帐号申请助手文件夹（内含"步骤""帐号申请模版"）：
-# https://drive.google.com/drive/u/1/folders/1pgQFwdl8tV8RP1pOkkHpKpdiwxUwfJtT
-ACCOUNT_APPLICATION_ASSISTANT_FOLDER_ID = os.environ.get(
-    "ACCOUNT_APPLICATION_ASSISTANT_FOLDER_ID", "1pgQFwdl8tV8RP1pOkkHpKpdiwxUwfJtT"
+ACCOUNT_APPLICATION_ROSTER_SHEET_GID = int(os.environ.get(
+    "ACCOUNT_APPLICATION_ROSTER_SHEET_GID", "139264850"
+))
+# 花名册（机器人）：https://docs.google.com/spreadsheets/d/1OoNt1C0YyO4pBjle7eQjbuuepOpKk1gK8JlumdagGWM/edit?gid=139264850
+ACCOUNT_APPLICATION_ROSTER_BOT_SPREADSHEET_ID = os.environ.get(
+    "ACCOUNT_APPLICATION_ROSTER_BOT_SPREADSHEET_ID",
+    "1OoNt1C0YyO4pBjle7eQjbuuepOpKk1gK8JlumdagGWM",
 )
-# 花名册列位置（电子表格列字母）：C姓名 F生效日期 O部门 AD/AE工作帐号申请状态对比列。
-ACCOUNT_APPLICATION_NAME_COLUMN = "C"
-ACCOUNT_APPLICATION_EFFECTIVE_DATE_COLUMN = "F"
-ACCOUNT_APPLICATION_DEPARTMENT_COLUMN = "O"
-ACCOUNT_APPLICATION_STATUS_COLUMNS = ("AD", "AE")
+ACCOUNT_APPLICATION_ROSTER_BOT_SHEET_GID = int(os.environ.get(
+    "ACCOUNT_APPLICATION_ROSTER_BOT_SHEET_GID", "139264850"
+))
 ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE = 6
 # 研发部/效能部理由固定"新人入职工作需要"；其他部门理由"新人入职满7天"，
 # 只对生效日期>=这个日期起的人生效，历史存量不在本次自动化范围内。
