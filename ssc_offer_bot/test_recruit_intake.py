@@ -1,5 +1,7 @@
 import ast
+import asyncio
 import copy
+import random
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
@@ -17,6 +19,12 @@ class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
                  and n.name in {'on_private_message','replay_pending_recruiter_dm','retry_recruit_notifications'}]
         for node in nodes:
             node.decorator_list = []
+        self.ns['asyncio'] = asyncio
+        self.ns['random'] = random
+        # 招聘私聊我发候选人信息时会顺带点个表情确认收到，这个功能有自己
+        # 独立的测试文件(test_recruit_private_sent_reaction.py)，这里只
+        # 关心私聊信息合并这一件事，用AsyncMock占位，不拉入真实实现。
+        self.ns['_send_delayed_reaction'] = AsyncMock()
         exec(compile(ast.Module(body=nodes,type_ignores=[]),'<intake>','exec'),self.ns)
         self.ns['log'].info = lambda *a: None
         self.ns['build_onboarding_confirm_message'] = build_onboarding_confirm_message
@@ -32,7 +40,7 @@ class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
         self.ns['outbox'] = flow.Store({})
         self.text = ('3️⃣招聘信息\n招聘渠道：万天招聘部\n简历来源：齐夏\n招聘通道：个人资源\n'
                      '4️⃣入职信息\n候选人姓名：小C\n入职日期：9/16\n候选人联系方式：@example')
-        self.event = NS(is_private=True,raw_text=self.text,message=NS(id=90),
+        self.event = NS(is_private=True,raw_text=self.text,message=NS(id=90),chat_id=8,
                         get_sender=AsyncMock(return_value=NS(id=8,username='recruiter')))
 
     async def test_screenshot_dm_generates_saved_onboarding_draft(self):
@@ -48,7 +56,7 @@ class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
     async def test_swapped_date_and_contact_in_dm_are_corrected(self):
         text = ('3️⃣招聘信息\n招聘渠道：万天招聘部\n简历来源：齐夏\n招聘通道：个人资源\n'
                 '4️⃣入职信息\n候选人姓名：小C\n入职日期：@dashit88\n候选人联系方式：2026.10.08')
-        event = NS(is_private=True, raw_text=text, message=NS(id=91),
+        event = NS(is_private=True, raw_text=text, message=NS(id=91), chat_id=8,
                    get_sender=AsyncMock(return_value=NS(id=8, username='recruiter')))
         await self.ns['on_private_message'](event)
         call = self.ns['queue_group_message'].call_args
@@ -63,7 +71,7 @@ class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rec['pending_recruiter_dm']['message_id'],90)
         self.ns['queue_group_message'].assert_not_awaited()
         self.rec['stage'] = 'waiting_recruiter_dm'
-        self.ns['client'].get_messages = AsyncMock(return_value=NS(raw_text=self.text,
+        self.ns['client'].get_messages = AsyncMock(return_value=NS(raw_text=self.text, id=90,
                    get_sender=self.event.get_sender))
         await self.ns['replay_pending_recruiter_dm']('小C')
         self.ns['queue_group_message'].assert_awaited_once()

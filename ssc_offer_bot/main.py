@@ -14,6 +14,11 @@ SSC Offer 审批流转自动化 主程序。
           终审人任意回复（或点👌表情）
             -> 去招聘群搜同名候选人的简历消息，回复它，@招聘 + @hrbp，
                并提示"请招聘私聊我"补充招聘/入职信息
+          招聘在招聘群回复该通知、消息含"私发"关键词（如"入职信息已私发"）
+            -> 随机延迟10-30秒，给这条回复随机点👌或❤️表情，模拟SSC手动
+               确认收到的节奏
+          招聘私聊我发候选人信息（消息含"招聘信息"或"入职信息"关键词）
+            -> 同样随机延迟10-30秒，给这条私聊消息随机点👌或❤️表情
 
   场景三：招聘私聊我，消息里包含"招聘信息"或"入职信息"关键词
           -> 合并已有信息 + 私聊补充信息，拼出完整【入职信息确认】
@@ -106,7 +111,7 @@ from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient, events, utils
 from telethon.tl.types import UpdateMessageReactions, ReactionEmoji
-from telethon.tl.functions.messages import GetMessageReactionsListRequest
+from telethon.tl.functions.messages import GetMessageReactionsListRequest, SendReactionRequest
 
 import config
 from state_store import StateStore
@@ -1500,6 +1505,47 @@ async def _send_delayed_ok_reply(chat_id, message_id, delay_seconds):
         log.exception("[账号申请] 延迟回复ok失败：chat_id=%s msg_id=%s", chat_id, message_id)
 
 
+# 招聘确认"已私发"候选人信息后，SSC通常会手动点个表情确认收到；这里随机挑
+# 一个模拟同样的效果，不固定用一种表情，避免看起来像机器人秒回。
+RECRUIT_PRIVATE_SENT_ACK_EMOJIS = ("👌", "❤️")
+
+
+async def _send_delayed_reaction(chat_id, message_id, delay_seconds):
+    """随机延迟一段时间后给指定消息点一个随机表情（👌或❤️），模拟SSC本人
+    手动确认收到的节奏，而不是消息一出现就秒回。"""
+    try:
+        await asyncio.sleep(delay_seconds)
+        emoji = random.choice(RECRUIT_PRIVATE_SENT_ACK_EMOJIS)
+        await client(SendReactionRequest(
+            peer=chat_id, msg_id=message_id, reaction=[ReactionEmoji(emoticon=emoji)],
+        ))
+    except Exception:
+        log.exception("[招聘私发确认] 延迟点表情失败：chat_id=%s msg_id=%s", chat_id, message_id)
+
+
+@client.on(events.NewMessage(chats=config.GROUP_RECRUIT, incoming=True))
+async def on_recruit_private_sent_reply(event):
+    """场景二：终审通知里让招聘"私聊我"发候选人信息之后，招聘经常会回到
+    招聘群、回复那条通知说一声"私发了"/"入职信息已私发"之类的话确认已经
+    照做——SSC看到后通常会手动点个👌或❤️表情确认收到。这里自动化同样的
+    确认动作：只处理"回复机器人自己发的那条通知"且带"私发"关键词的消息，
+    不误伤招聘群里其它跟"私发"无关的日常对话。
+    """
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    if not event.is_reply:
+        return
+    if "私发" not in (event.raw_text or ""):
+        return
+    replied = await event.get_reply_message()
+    me = await client.get_me()
+    if not replied or replied.sender_id != me.id:
+        return
+    asyncio.create_task(_send_delayed_reaction(
+        event.chat_id, event.message.id, random.uniform(10, 30)
+    ))
+
+
 @client.on(events.NewMessage(incoming=True))
 async def on_account_request_trigger(event):
     if not config.ACCOUNT_REQUEST_ENABLED:
@@ -2500,7 +2546,7 @@ async def replay_pending_recruiter_dm(name):
         if message:
             from types import SimpleNamespace
             await on_private_message(SimpleNamespace(is_private=True, raw_text=message.raw_text,
-                message=message, get_sender=message.get_sender))
+                message=message, chat_id=pending['sender_id'], get_sender=message.get_sender))
     except Exception:
         log.exception('[入职确认] %s 提前私聊恢复失败', name)
 
@@ -2513,6 +2559,13 @@ async def on_private_message(event):
     text = event.raw_text or ""
     if "招聘信息" not in text and "入职信息" not in text:
         return
+
+    # 这就是招聘私聊我发候选人信息的那条消息本身；SSC平时会手动点个表情
+    # 确认收到，这里自动化同样的确认动作，跟下面能不能顺利匹配到候选人、
+    # 生成不生成入职确认草稿完全独立，不影响也不依赖后续处理结果。
+    asyncio.create_task(_send_delayed_reaction(
+        event.chat_id, event.message.id, random.uniform(10, 30)
+    ))
 
     sender = await event.get_sender()
     sender_username = sender.username or ""
