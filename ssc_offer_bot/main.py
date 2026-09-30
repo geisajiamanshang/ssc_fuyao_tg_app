@@ -21,11 +21,15 @@ SSC Offer 审批流转自动化 主程序。
             -> 同样随机延迟10-30秒，给这条私聊消息随机点👌或❤️表情
 
   场景三：招聘私聊我，消息里包含"招聘信息"或"入职信息"关键词
-          -> 合并已有信息 + 私聊补充信息，拼出完整【入职信息确认】
+          （或者SSC自己把招聘发来的候选人信息转发/粘贴到收藏夹，带
+           "3️⃣招聘信息"/"4️⃣入职信息"编号小标题，效果相同，不用等招聘
+           亲自私聊我）
+          -> 合并已有信息 + 补充信息，拼出完整【入职信息确认】
           -> 回复到联合管理工作群里对应的【offer信息确认】消息，@对应部门领导
           （生成失败，比如部门领导名单未配置、原Offer消息读取失败）
-            -> 这条私聊消息会记录下来，不需要招聘重新发一遍；SSC在收藏夹
-               发"重试入职确认"，会用记录下来的消息重放一次生成逻辑
+            -> 这条消息会记录下来，不需要招聘重新发一遍；SSC在收藏夹发
+               "重试入职确认"，会优先用记录下来的消息重放，没记录的话
+               改成去对应招聘的私聊历史里搜一遍
 
   场景四：联合管理工作群的入职信息确认发布成功后
           -> 再次经收藏夹审批（测试11/11）
@@ -2554,12 +2558,42 @@ async def replay_pending_recruiter_dm(name):
         log.exception('[入职确认] %s 提前私聊恢复失败', name)
 
 
+async def find_and_replay_recruiter_dm(name, rec):
+    """候选人卡在waiting_recruiter_dm，但没有pending_recruiter_dm记录——
+    通常是招聘那条私聊消息在"重试入职确认"这个恢复机制上线之前就已经
+    处理失败过，没能被记录下来（比如米娅这次：部门领导名单没配置，那次
+    失败发生在这个功能上线前）。这种情况招聘其实已经发过信息了，不需要
+    再发一遍：去这个候选人对应招聘（记录里已保存的recruiter_id）的私聊
+    历史里，搜一条提到候选人姓名、且带"招聘信息"或"入职信息"关键词的
+    消息，重放一次。只搜这一个招聘的私聊，不会跟别的招聘或别的候选人
+    的同名消息混在一起。"""
+    recruiter_id = rec.get('recruiter_id')
+    if not recruiter_id:
+        return
+    try:
+        messages = await client.get_messages(recruiter_id, search=name, limit=30)
+    except Exception:
+        log.exception('[入职确认重试] %s 搜索招聘私聊历史失败', name)
+        return
+    match = next((m for m in messages if m and (
+        '招聘信息' in (m.raw_text or '') or '入职信息' in (m.raw_text or ''))), None)
+    if not match:
+        return
+    from types import SimpleNamespace
+    await on_private_message(SimpleNamespace(is_private=True, raw_text=match.raw_text,
+        message=match, chat_id=recruiter_id, get_sender=match.get_sender))
+
+
 @client.on(events.NewMessage())
 async def retry_onboarding_confirmations(event):
     """入职确认在场景三生成失败时（比如部门领导名单没配置、原Offer消息读
-    取失败），对应候选人会停在waiting_recruiter_dm阶段，招聘那条私聊消息
-    也已经记录成pending_recruiter_dm——不需要招聘重新发一遍，SSC在收藏夹
-    发"重试入职确认"，就会对所有卡在这一步的候选人重放一次生成逻辑。"""
+    取失败），对应候选人会停在waiting_recruiter_dm阶段。SSC在收藏夹发
+    "重试入职确认"：
+      - 如果那条私聊消息已经记录成pending_recruiter_dm（在这个恢复机制
+        上线之后失败的情况），直接用记录重放，最快最准；
+      - 如果没有记录（比如失败发生在这个功能上线之前，米娅那次就是），
+        改成去对应招聘的私聊历史里搜一遍，同样不需要招聘重新发一遍。
+    """
     if event.chat_id in config.EXCLUDED_CHAT_IDS:
         return
     if (event.raw_text or '').strip() != '重试入职确认':
@@ -2568,9 +2602,12 @@ async def retry_onboarding_confirmations(event):
     if not event.is_private or event.chat_id != me.id or event.sender_id != me.id:
         return
     for name, rec in list(state.all().items()):
-        if rec.get('stage') != 'waiting_recruiter_dm' or not rec.get('pending_recruiter_dm'):
+        if rec.get('stage') != 'waiting_recruiter_dm':
             continue
-        await replay_pending_recruiter_dm(name)
+        if rec.get('pending_recruiter_dm'):
+            await replay_pending_recruiter_dm(name)
+        else:
+            await find_and_replay_recruiter_dm(name, rec)
 
 
 @client.on(events.NewMessage(incoming=True))
@@ -2617,12 +2654,61 @@ async def on_private_message(event):
         await client.send_message(reviewer.id, notice, parse_mode=None)
         return
 
-    # 记录下这条私聊消息：万一下面生成入职确认失败（比如部门领导名单未
-    # 配置、原Offer消息读取失败），SSC在收藏夹发"重试入职确认"时可以直接
-    # 用这条记录重放一次，不用再麻烦招聘重新发一遍。成功生成后会在下面
-    # 清空（见本函数末尾）。
-    state.update(candidate_name, pending_recruiter_dm={'sender_id': sender.id,
-                                                         'message_id': event.message.id})
+    await generate_onboarding_confirmation(candidate_name, rec, text,
+                                            sender_id=sender.id, message_id=event.message.id)
+
+
+# 招聘发来的候选人信息一般走上面的私聊入口；但SSC有时不等招聘私聊，直接
+# 把候选人信息转发/粘贴到自己的收藏夹（Saved Messages）里，这种情况也
+# 要能识别处理——只是SSC自己收藏夹里同时还会出现机器人自动发的各种草稿
+# （offer信息确认、招聘群通知、入职信息确认本身……），不能靠"招聘信息"/
+# "入职信息"这种宽松关键词去认，那样会把机器人自己生成的【入职信息确认】
+# 草稿（标题里就带"入职信息"四个字）当成新的候选人信息再处理一遍，
+# 造成重复生成甚至死循环。改成认招聘提交候选人信息时固定用的"3️⃣招聘信息"
+# "4️⃣入职信息"编号小标题，机器人自己的输出模板不会用这种格式。
+CANDIDATE_INFO_SECTION_MARKERS = ("3️⃣招聘信息", "4️⃣入职信息")
+# 双重保险：即使误配出跟招聘格式撞车的文本，只要是机器人自己那几种输出
+# 模板的标志性方括号标题，也一律不当作新的候选人信息处理。
+BOT_OWN_DRAFT_MARKERS = ("【入职信息确认】", "【offer信息确认】", "【员工账号申请】")
+
+
+@client.on(events.NewMessage())
+async def on_ssc_favorites_candidate_info(event):
+    """SSC把招聘发来的候选人信息直接转发/粘贴到自己收藏夹时，效果应该跟
+    招聘私聊我发一样：只要带候选人姓名、且是招聘提交候选人信息时的那种
+    "3️⃣招聘信息"/"4️⃣入职信息"编号格式，就直接生成入职确认，不用等招聘
+    亲自私聊我一遍。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    me = await client.get_me()
+    if not event.is_private or event.chat_id != me.id or event.sender_id != me.id:
+        return
+    text = event.raw_text or ""
+    if not any(marker in text for marker in CANDIDATE_INFO_SECTION_MARKERS):
+        return
+    if any(marker in text for marker in BOT_OWN_DRAFT_MARKERS):
+        return
+    fields = parse_kv_fields(text)
+    name = get_field(fields, '候选人姓名', '简历名')
+    if not name:
+        return
+    rec = state.get(name)
+    if not rec or rec.get('stage') != 'waiting_recruiter_dm':
+        return
+    await generate_onboarding_confirmation(name, rec, text,
+                                            sender_id=me.id, message_id=event.message.id)
+
+
+async def generate_onboarding_confirmation(candidate_name, rec, text, *, sender_id, message_id):
+    """场景三核心：合并已有信息+补充文本，生成【入职信息确认】并转发到
+    联合管理工作群等待SSC审批。招聘私聊我、SSC自己收藏夹粘贴两个入口
+    共用这一套逻辑。"""
+    # 记录下这条消息：万一下面生成入职确认失败（比如部门领导名单未配置、
+    # 原Offer消息读取失败），SSC在收藏夹发"重试入职确认"时可以直接用这条
+    # 记录重放一次，不用再麻烦招聘重新发一遍。成功生成后会在下面清空
+    # （见本函数末尾）。
+    state.update(candidate_name, pending_recruiter_dm={'sender_id': sender_id,
+                                                         'message_id': message_id})
 
     dm_fields = parse_kv_fields(text)
     resume_fields = rec.get("resume_fields", {})
@@ -2651,7 +2737,6 @@ async def on_private_message(event):
                                   + '-入职确认未生成：原Offer消息不可用。请核对后在收藏夹发送“重试入职确认”。',
                                   parse_mode=None)
         return
-    original_fields = parse_kv_fields(offer_text)
     org_unit = get_field(merged_fields, "入职编制组织", "编制组织") or rec["org_unit"]
     leaders = get_leader_tags(org_unit, get_field(merged_fields, "入职部门"))
     if not leaders:
