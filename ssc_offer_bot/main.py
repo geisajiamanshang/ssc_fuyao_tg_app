@@ -23,6 +23,9 @@ SSC Offer 审批流转自动化 主程序。
   场景三：招聘私聊我，消息里包含"招聘信息"或"入职信息"关键词
           -> 合并已有信息 + 私聊补充信息，拼出完整【入职信息确认】
           -> 回复到联合管理工作群里对应的【offer信息确认】消息，@对应部门领导
+          （生成失败，比如部门领导名单未配置、原Offer消息读取失败）
+            -> 这条私聊消息会记录下来，不需要招聘重新发一遍；SSC在收藏夹
+               发"重试入职确认"，会用记录下来的消息重放一次生成逻辑
 
   场景四：联合管理工作群的入职信息确认发布成功后
           -> 再次经收藏夹审批（测试11/11）
@@ -2551,6 +2554,25 @@ async def replay_pending_recruiter_dm(name):
         log.exception('[入职确认] %s 提前私聊恢复失败', name)
 
 
+@client.on(events.NewMessage())
+async def retry_onboarding_confirmations(event):
+    """入职确认在场景三生成失败时（比如部门领导名单没配置、原Offer消息读
+    取失败），对应候选人会停在waiting_recruiter_dm阶段，招聘那条私聊消息
+    也已经记录成pending_recruiter_dm——不需要招聘重新发一遍，SSC在收藏夹
+    发"重试入职确认"，就会对所有卡在这一步的候选人重放一次生成逻辑。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    if (event.raw_text or '').strip() != '重试入职确认':
+        return
+    me = await client.get_me()
+    if not event.is_private or event.chat_id != me.id or event.sender_id != me.id:
+        return
+    for name, rec in list(state.all().items()):
+        if rec.get('stage') != 'waiting_recruiter_dm' or not rec.get('pending_recruiter_dm'):
+            continue
+        await replay_pending_recruiter_dm(name)
+
+
 @client.on(events.NewMessage(incoming=True))
 async def on_private_message(event):
     if not event.is_private:
@@ -2595,6 +2617,13 @@ async def on_private_message(event):
         await client.send_message(reviewer.id, notice, parse_mode=None)
         return
 
+    # 记录下这条私聊消息：万一下面生成入职确认失败（比如部门领导名单未
+    # 配置、原Offer消息读取失败），SSC在收藏夹发"重试入职确认"时可以直接
+    # 用这条记录重放一次，不用再麻烦招聘重新发一遍。成功生成后会在下面
+    # 清空（见本函数末尾）。
+    state.update(candidate_name, pending_recruiter_dm={'sender_id': sender.id,
+                                                         'message_id': event.message.id})
+
     dm_fields = parse_kv_fields(text)
     resume_fields = rec.get("resume_fields", {})
     if not resume_fields and rec.get("resume_msg_id"):
@@ -2618,7 +2647,9 @@ async def on_private_message(event):
     if not offer_text:
         log.warning("[场景3] 原Offer消息不可用，已停止生成入职确认：%s", candidate_name)
         reviewer = await get_ssc_reviewer()
-        await client.send_message(reviewer.id, candidate_name + '-入职确认未生成：原Offer消息不可用', parse_mode=None)
+        await client.send_message(reviewer.id, candidate_name
+                                  + '-入职确认未生成：原Offer消息不可用。请核对后在收藏夹发送“重试入职确认”。',
+                                  parse_mode=None)
         return
     original_fields = parse_kv_fields(offer_text)
     org_unit = get_field(merged_fields, "入职编制组织", "编制组织") or rec["org_unit"]
@@ -2626,7 +2657,8 @@ async def on_private_message(event):
     if not leaders:
         reviewer = await get_ssc_reviewer()
         await client.send_message(reviewer.id, candidate_name + '-入职确认未生成：未匹配通知名单；编制组织：' + org_unit
-                                  + '；入职部门：' + get_field(merged_fields, '入职部门'), parse_mode=None)
+                                  + '；入职部门：' + get_field(merged_fields, '入职部门')
+                                  + '。请核对配置后在收藏夹发送“重试入职确认”。', parse_mode=None)
         return
     final_text = build_onboarding_confirm_message(org_unit, merged_fields, leaders, offer_text)
 

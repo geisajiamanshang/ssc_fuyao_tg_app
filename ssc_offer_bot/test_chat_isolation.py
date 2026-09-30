@@ -12,7 +12,7 @@ class ChatIsolationTests(IsolatedAsyncioTestCase):
         source = ast.parse(Path(__file__).with_name('main.py').read_text())
         names = {'debug_all_messages', 'retry_recruit_notifications', 'on_ssc_send_approval',
                  'on_regularization_trigger', 'on_anniversary_trigger', 'on_hrbp_offer',
-                 'on_leadership_reply', 'on_ssc_onboarding_published'}
+                 'on_leadership_reply', 'on_ssc_onboarding_published', 'retry_onboarding_confirmations'}
         functions = [n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
                      and n.name in names]
         for node in functions:
@@ -52,6 +52,12 @@ class ChatIsolationTests(IsolatedAsyncioTestCase):
     async def test_retry_notifications_skips_test_group(self):
         event = NS(chat_id=-999, raw_text='重试招聘通知')
         result = await self.env['retry_recruit_notifications'](event)
+        self.assertIsNone(result)
+        self.env['client'].get_me.assert_not_called()
+
+    async def test_retry_onboarding_confirmations_skips_test_group(self):
+        event = NS(chat_id=-999, raw_text='重试入职确认')
+        result = await self.env['retry_onboarding_confirmations'](event)
         self.assertIsNone(result)
         self.env['client'].get_me.assert_not_called()
 

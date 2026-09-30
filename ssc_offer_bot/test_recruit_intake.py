@@ -15,8 +15,15 @@ class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         flow.FlowTests.setUp(self)
         self.ns = dict(flow.ns)
+        # on_private_message/retry_onboarding_confirmations还要用到
+        # config.GROUP_RECRUIT和config.EXCLUDED_CHAT_IDS，flow.config没有
+        # 这两个字段；这里换一份本地的config，不去改共享的flow.config，
+        # 避免影响其它引用flow.ns的测试文件。
+        self.ns['config'] = NS(GROUP_LEADERSHIP=flow.config.GROUP_LEADERSHIP,
+                                GROUP_RECRUIT=-777, EXCLUDED_CHAT_IDS=frozenset())
         nodes = [copy.deepcopy(n) for n in flow.tree.body if isinstance(n, ast.AsyncFunctionDef)
-                 and n.name in {'on_private_message','replay_pending_recruiter_dm','retry_recruit_notifications'}]
+                 and n.name in {'on_private_message','replay_pending_recruiter_dm',
+                                 'retry_recruit_notifications','retry_onboarding_confirmations'}]
         for node in nodes:
             node.decorator_list = []
         self.ns['asyncio'] = asyncio
@@ -82,6 +89,43 @@ class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
         await self.ns['on_private_message'](self.event)
         self.ns['queue_group_message'].assert_not_awaited()
         self.assertIn('final_approved_no_resume_found',self.ns['client'].send_message.call_args.args[1])
+
+    async def test_generation_failure_keeps_pending_dm_for_retry(self):
+        # 真实事故：部门领导名单没配置（比如新部门"AIGC原创部"），入职确认
+        # 生成失败；这条私聊消息不能丢，要留着给"重试入职确认"用。
+        self.ns['get_leader_tags'] = lambda *a: []
+        await self.ns['on_private_message'](self.event)
+        self.ns['queue_group_message'].assert_not_awaited()
+        self.assertEqual(self.rec['stage'], 'waiting_recruiter_dm')
+        self.assertEqual(self.rec['pending_recruiter_dm']['message_id'], 90)
+        notice = self.ns['client'].send_message.call_args.args[1]
+        self.assertIn('未匹配通知名单', notice)
+        self.assertIn('重试入职确认', notice)
+
+    async def test_retry_onboarding_confirmations_regenerates_after_config_fixed(self):
+        # 第一次因为部门领导名单未配置失败，记录卡在waiting_recruiter_dm，
+        # 招聘那条私聊消息记录成了pending_recruiter_dm。
+        self.ns['get_leader_tags'] = lambda *a: []
+        await self.ns['on_private_message'](self.event)
+        self.assertEqual(self.rec['pending_recruiter_dm']['message_id'], 90)
+        self.ns['queue_group_message'].assert_not_awaited()
+        # 补上部门领导配置后，SSC在收藏夹发"重试入职确认"，不用麻烦招聘重发。
+        self.ns['get_leader_tags'] = lambda *a: ['leader']
+        self.ns['client'].get_me = AsyncMock(return_value=NS(id=99))
+        self.ns['client'].get_messages = AsyncMock(return_value=NS(raw_text=self.text, id=90,
+                   get_sender=self.event.get_sender))
+        retry_event = NS(chat_id=99, raw_text='重试入职确认', is_private=True, sender_id=99)
+        await self.ns['retry_onboarding_confirmations'](retry_event)
+        self.ns['queue_group_message'].assert_awaited_once()
+        self.assertIsNone(self.rec['pending_recruiter_dm'])
+
+    async def test_retry_onboarding_confirmations_skips_candidates_without_pending_dm(self):
+        # 还没收到过招聘私聊补充信息的候选人（没有pending_recruiter_dm）
+        # 不应该被"重试入职确认"误触发。
+        self.ns['client'].get_me = AsyncMock(return_value=NS(id=99))
+        retry_event = NS(chat_id=99, raw_text='重试入职确认', is_private=True, sender_id=99)
+        await self.ns['retry_onboarding_confirmations'](retry_event)
+        self.ns['queue_group_message'].assert_not_awaited()
 
     def test_resume_format_and_reused_code(self):
         match = self.ns['matches_recruit_candidate']
