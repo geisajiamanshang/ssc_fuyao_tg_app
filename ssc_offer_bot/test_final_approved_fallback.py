@@ -5,6 +5,7 @@
 和提交Offer的BP不是同一个TG账号的那条。"""
 
 import ast
+import re
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -17,12 +18,12 @@ source = Path(__file__).with_name('main.py').read_text()
 tree = ast.parse(source)
 selected = {
     'matches_recruit_candidate', 'matches_recruit_candidate_by_name',
-    '_normalized_name', 'handle_final_approved', '_pick_preferred_recruit_message',
+    '_normalized_name', '_core_name', 'handle_final_approved', '_pick_preferred_recruit_message',
 }
 config = NS(GROUP_RECRUIT=-456)
 ns = dict(
     config=config, parse_kv_fields=parse_kv_fields, get_field=get_field,
-    unicodedata=unicodedata,
+    unicodedata=unicodedata, re=re,
 )
 exec(compile(ast.Module(
     body=[n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -129,6 +130,38 @@ class FinalApprovedFallbackTests(unittest.IsolatedAsyncioTestCase):
         rec = {'raw_fields': {'候选人编码': 'A1'}}
         await ns['handle_final_approved']('shun', rec)
         self.assertEqual(ns['queue_group_message'].call_args.kwargs['reply_to'], 70)
+
+    async def test_resume_with_trailing_gender_annotation_is_found(self):
+        # 真实事故：批量终审检查提醒误报"米娅：审批已通过，但未找到招聘
+        # 简历，未生成发送草稿"，招聘群里简历其实在，"候选人姓名"这一行
+        # 写的是"米娅（女）"，精确比对姓名失败。
+        resume = NS(
+            id=115,
+            raw_text='候选人编码：HJHT0000115\n候选人姓名：米娅（女）\n应聘岗位：AI视频生成师',
+            get_sender=AsyncMock(return_value=NS(id=8, username='recruiter')),
+        )
+        ns['client'].iter_messages = messages(resume)
+        rec = {'raw_fields': {'候选人编码': 'HJHT0000115'}}
+        await ns['handle_final_approved']('米娅', rec)
+        call = ns['queue_group_message'].call_args
+        self.assertIsNotNone(call, '姓名带性别后缀的简历应该能正常匹配，不应该判定为找不到')
+        self.assertEqual(call.kwargs['reply_to'], 115)
+        ns['client'].send_message.assert_not_awaited()
+
+    async def test_resume_with_trailing_english_name_annotation_is_found(self):
+        # 同一起事故的第二个候选人："候选人姓名：张瑞杰 (Jerry zhang)"。
+        resume = NS(
+            id=97,
+            raw_text='候选人编码：HJLDL0097\n候选人姓名：张瑞杰 (Jerry zhang)\n应聘岗位：Ai测试工程师',
+            get_sender=AsyncMock(return_value=NS(id=8, username='recruiter')),
+        )
+        ns['client'].iter_messages = messages(resume)
+        rec = {'raw_fields': {'候选人编码': 'HJLDL0097'}}
+        await ns['handle_final_approved']('张瑞杰', rec)
+        call = ns['queue_group_message'].call_args
+        self.assertIsNotNone(call)
+        self.assertEqual(call.kwargs['reply_to'], 97)
+        ns['client'].send_message.assert_not_awaited()
 
     async def test_no_match_at_all_still_reports_for_manual_handling(self):
         unrelated = NS(id=90, raw_text='候选人姓名：小明\n入职部门：技术中心',

@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import re
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -14,11 +15,12 @@ tree = ast.parse(source)
 selected = {'approval_roles', 'role_username', 'approval_role', 'batch_approval',
             'apply_approval_evidence', 'advance_offer', 'process_leadership_reply',
             'notify_missing', 'todays_offer_records', 'recover_approval_evidence', 'approval_target',
-            'matches_recruit_candidate', 'get_leader_tags'}
+            'matches_recruit_candidate', 'matches_recruit_candidate_by_name',
+            '_normalized_name', '_core_name', 'get_leader_tags'}
 config = NS(LEADER_FIRST='first_user', LEADER_SECOND_TECH='second_user',
             LEADER_FINAL='final_user', DAILY_REPORT_TIMEZONE='Asia/Shanghai',
             GROUP_LEADERSHIP=-123)
-ns = dict(config=config, unicodedata=unicodedata, is_approval=is_approval,
+ns = dict(config=config, unicodedata=unicodedata, re=re, is_approval=is_approval,
           ZoneInfo=ZoneInfo)
 exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in selected], type_ignores=[]), '<flow>', 'exec'), ns)
 real_target=ns['approval_target']
@@ -53,6 +55,26 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(match('候选人姓名：小仙', '小仙'))
         self.assertTrue(match('候选人编码：A1\n简历名：小仙', '小仙'))
         self.assertFalse(match('候选人编码：B2\n简历名：小仙', '小仙', 'A1'))
+
+    def test_resume_name_with_trailing_annotation_still_matches(self):
+        # 真实事故：批量终审检查提醒误报"审批已通过，但未找到招聘简历"，
+        # 招聘群里两份简历其实都在，只是"候选人姓名"这一行被招聘/HR顺手
+        # 加了性别或英文名，例如"米娅（女）""张瑞杰 (Jerry zhang)"，导致
+        # 精确姓名比对失败。真实姓名到第一个括号为止才应该参与比对。
+        match = ns['matches_recruit_candidate']
+        self.assertTrue(match('候选人编码：HJHT0000115\n候选人姓名：米娅（女）', '米娅'))
+        self.assertTrue(
+            match('候选人编码：HJLDL0097\n候选人姓名：张瑞杰 (Jerry zhang)', '张瑞杰')
+        )
+        # 括号里的内容确实不同也不影响——只看括号前的姓名本体。
+        self.assertTrue(match('候选人编码：A1\n候选人姓名：小仙（男）', '小仙'))
+        # 但姓名本体不一样时，仍然不能误配对。
+        self.assertFalse(match('候选人编码：A1\n候选人姓名：小仙儿（女）', '小仙'))
+
+    def test_fallback_name_match_also_strips_trailing_annotation(self):
+        match_by_name = ns['matches_recruit_candidate_by_name']
+        self.assertTrue(match_by_name('候选人姓名：米娅（女）\n面试方式：Zoom', '米娅'))
+        self.assertTrue(match_by_name('候选人姓名：张瑞杰 (Jerry zhang)', '张瑞杰'))
 
     def test_recruiter_candidate_disambiguation(self):
         from state_store import StateStore

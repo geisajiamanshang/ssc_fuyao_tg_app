@@ -2332,9 +2332,24 @@ async def process_batch_final(event):
         await _send_saved_text(me.id, '批量终审检查提醒（' + str(day) + '）\n' + '\n'.join(warnings))
 
 
+def _core_name(value):
+    """去掉姓名后面顺手带的说明性文字（性别、英文名等）——招聘群的简历/
+    线索消息是人工随手打的，不像内部流转的结构化字段那样规范，"候选人
+    姓名"这一行有时会直接写成"米娅（女）"或"张瑞杰 (Jerry zhang)"这样，
+    真实姓名到第一个半角/全角括号为止。真实事故：批量终审检查提醒误报
+    "审批已通过，但未找到招聘简历"，招聘群里其实两条简历都在，只是姓名
+    字段带了这类后缀，导致精确匹配失败。括号前如果有空格也一并去掉。
+    """
+    value = value or ""
+    match = re.search(r"[（(]", value)
+    core = value[:match.start()] if match else value
+    return core.rstrip()
+
+
 def matches_recruit_candidate(text: str, candidate_name: str, candidate_code: str = "") -> bool:
     """简历必须含编码；同时校验姓名，防止测试简历复用编码导致串人。"""
     def normalized(value):
+        value = _core_name(value)
         return "".join(c for c in unicodedata.normalize("NFKC", value or "").casefold()
                        if not c.isspace() and unicodedata.category(c) != 'Cf')
 
@@ -2352,6 +2367,7 @@ def matches_recruit_candidate(text: str, candidate_name: str, candidate_code: st
 
 
 def _normalized_name(value):
+    value = _core_name(value)
     return "".join(c for c in unicodedata.normalize("NFKC", value or "").casefold()
                    if not c.isspace() and unicodedata.category(c) != 'Cf')
 
