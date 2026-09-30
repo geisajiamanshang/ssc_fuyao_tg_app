@@ -63,9 +63,10 @@ class MemoryStore:
 
 class FakeDateTime:
     """冻结 on_ssc_account_application_trigger 里 datetime.now(...).date() 用到
-    的"今天"，避免测试结果随容器实际时钟漂移（生效日期筛选依赖"今天"）。
-    datetime.strptime 原样转发给真正的 datetime，因为解析cutover日期字符串
-    不需要冻结。
+    的"今天"，让草稿里"申请日期"字段的值在测试里确定、不随容器实际时钟
+    漂移（生效日期筛选现在只看cutover_date，不再依赖"今天"，但"申请日期"
+    字段仍然要填"今天"）。datetime.strptime 原样转发给真正的 datetime，
+    因为解析cutover日期字符串不需要冻结。
     """
     _fixed_now = datetime(2026, 10, 10, 12, 0, 0)
 
@@ -84,7 +85,6 @@ def base_config(**overrides):
         ACCOUNT_APPLICATION_ENABLED=True,
         ACCOUNT_APPLICATION_TRIGGER_KEYWORD="帐号申请",
         ACCOUNT_APPLICATION_APPROVAL_CODE="测试111",
-        ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE=6,
         ACCOUNT_APPLICATION_TECH_DEPARTMENTS=("研发部", "效能部"),
         ACCOUNT_APPLICATION_CUTOVER_DATE="2026-10-01",
         DAILY_REPORT_TIMEZONE="Asia/Shanghai",
@@ -158,8 +158,7 @@ def fav_event(text, msg_id=1):
 class AccountApplicationTriggerTests(IsolatedAsyncioTestCase):
     def setUp(self):
         # 冻结"今天"=2026-10-10（见FakeDateTime）。cutover=2026-10-01不论
-        # 部门都要满足，min_days=6也要满足，所以生效日期定在10-01到10-04
-        # 之间（>=6天前）才会被这批测试当作"应该生成"的正例。
+        # 部门都要满足，达标即处理，不再额外要求生效满多少天。
         # 廖伊波：效能部，生效日期在cutover当天，AD==AE（还没申请）→ 应该
         # 生成【员工账号申请】草稿。
         # 张三：运营1部，生效日期在cutover(2026-10-01)之前 → 按理由判断跳过。
@@ -252,16 +251,22 @@ class AccountApplicationTriggerTests(IsolatedAsyncioTestCase):
         self.assertIn('申请原因：新人入职满7天', drafts[0])
         self.assertIn('申请数量：1个', drafts[0])
 
-    async def test_duplicate_name_across_sheets_prefers_primary_and_notifies(self):
+    async def test_duplicate_name_across_sheets_prefers_primary_without_notifying(self):
+        # 同名冲突按"花名册"为准静默处理，不再发收藏夹提示打扰SSC（只记
+        # 日志）；用"别的部门"的数据验证草稿确实用的是primary(花名册)的
+        # 内容，不是secondary(花名册（机器人）)的。
         secondary_with_dup = roster_sheet_rows(
             data_row(name="廖伊波", effective_date="2020-01-01", department="别的部门",
                      work_tg="x", personal_contact="y"),
         )
         env = build_env(primary_rows=self.primary_rows, secondary_rows=secondary_with_dup)
         await env['on_ssc_account_application_trigger'](fav_event('帐号申请'))
-        notices = [t for d, t, _f in env['_sent'] if d == 9 and '重复' in t]
-        self.assertEqual(len(notices), 1)
-        self.assertIn('廖伊波', notices[0])
+        notices = [t for d, t, _f in env['_sent'] if '重复' in t]
+        self.assertEqual(notices, [])
+        drafts = [t for d, t, _f in env['_sent'] if d == 9]
+        self.assertEqual(len(drafts), 1)
+        self.assertTrue(drafts[0].startswith('【员工账号申请】'))
+        self.assertIn('花名：廖伊波', drafts[0])
 
     async def test_disabled_reports_to_favorites(self):
         env = build_env(primary_rows=self.primary_rows, secondary_rows=self.secondary_rows,

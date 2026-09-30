@@ -104,51 +104,38 @@ class MergeRostersTests(unittest.TestCase):
 
 
 class NeedsAccountApplicationTests(unittest.TestCase):
-    def test_true_when_effective_long_enough_and_work_tg_still_placeholder(self):
+    """needs_account_application 现在只看工作TG(AD)/私人联系方式(AE)，不再
+    看生效日期——是否在自动化处理范围内(生效日期>=cutover_date)完全交给
+    account_application_reason() 判断，按SSC反馈：日期达标就该立刻处理，
+    不再额外要求生效满多少天。
+    """
+
+    def test_true_when_work_tg_still_placeholder(self):
         # 真实例子：阿林还没申请，工作TG(AD)和私人联系方式(AE)相同。
-        row = {
-            "effective_date": date(2026, 9, 1),
-            "work_tg": "@alin65175",
-            "personal_contact": "@alin65175",
-        }
-        self.assertTrue(needs_account_application(row, date(2026, 9, 10)))
+        row = {"work_tg": "@alin65175", "personal_contact": "@alin65175"}
+        self.assertTrue(needs_account_application(row))
 
     def test_false_when_work_tg_already_different_from_personal_contact(self):
         # 真实例子：范谦和已经申请过，工作TG和私人联系方式不同。
-        row = {
-            "effective_date": date(2026, 9, 1),
-            "work_tg": "@fanqianhe1108",
-            "personal_contact": "@fanqianhe123",
-        }
-        self.assertFalse(needs_account_application(row, date(2026, 9, 10)))
-
-    def test_false_when_not_enough_days_elapsed(self):
-        row = {
-            "effective_date": date(2026, 9, 8),
-            "work_tg": "@x", "personal_contact": "@x",
-        }
-        self.assertFalse(needs_account_application(row, date(2026, 9, 10)))
-
-    def test_false_when_date_unparseable(self):
-        row = {"effective_date": None, "work_tg": "@x", "personal_contact": "@x"}
-        self.assertFalse(needs_account_application(row, date(2026, 9, 10)))
+        row = {"work_tg": "@fanqianhe1108", "personal_contact": "@fanqianhe123"}
+        self.assertFalse(needs_account_application(row))
 
     def test_true_when_work_tg_blank(self):
         # AD列完全空白：不管AE列有没有填，都算还没申请。
-        row = {"effective_date": date(2026, 9, 1), "work_tg": "", "personal_contact": ""}
-        self.assertTrue(needs_account_application(row, date(2026, 9, 10)))
+        row = {"work_tg": "", "personal_contact": ""}
+        self.assertTrue(needs_account_application(row))
         row["personal_contact"] = "@x"
-        self.assertTrue(needs_account_application(row, date(2026, 9, 10)))
+        self.assertTrue(needs_account_application(row))
 
     def test_true_when_work_tg_is_placeholder_text(self):
         # AD列填"同上"这类占位文字，等价于跟AE列相同。
-        row = {"effective_date": date(2026, 9, 1), "work_tg": "同上", "personal_contact": "@x"}
-        self.assertTrue(needs_account_application(row, date(2026, 9, 10)))
+        row = {"work_tg": "同上", "personal_contact": "@x"}
+        self.assertTrue(needs_account_application(row))
 
     def test_false_when_work_tg_filled_but_personal_contact_missing(self):
         # AD列填了具体内容，但AE列是空的，没法比对是否只是占位，不处理。
-        row = {"effective_date": date(2026, 9, 1), "work_tg": "@fanqianhe1108", "personal_contact": ""}
-        self.assertFalse(needs_account_application(row, date(2026, 9, 10)))
+        row = {"work_tg": "@fanqianhe1108", "personal_contact": ""}
+        self.assertFalse(needs_account_application(row))
 
 
 class IsTechDepartmentTests(unittest.TestCase):
@@ -170,32 +157,41 @@ class AccountApplicationReasonTests(unittest.TestCase):
         # 生效日期早于cutover的历史存量，哪怕是研发部/效能部也不处理——
         # 这是根据线上真实测试反馈修正的：之前研发部/效能部会绕过cutover
         # 直接生成，导致本该等到10-1之后才处理的人提前生成了草稿。
-        row = {"department": "效能部", "effective_date": date(2026, 1, 1)}
+        row = {"department": "效能部", "effective_date": date(2026, 9, 30)}
         reason = account_application_reason(
-            row, date(2026, 9, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
+            row, tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
         self.assertIsNone(reason)
 
     def test_tech_department_on_or_after_cutover_qualifies(self):
+        # 生效日期达标就立刻处理，不再额外要求生效满多少天——哪怕就是
+        # cutover当天，也应该生成。
         row = {"department": "效能部", "effective_date": date(2026, 10, 1)}
         reason = account_application_reason(
-            row, date(2026, 10, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
+            row, tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
         self.assertEqual(reason, "新人入职工作需要")
 
     def test_other_department_before_cutover_is_skipped(self):
-        row = {"department": "运营1部", "effective_date": date(2026, 9, 1)}
+        row = {"department": "运营1部", "effective_date": date(2026, 9, 30)}
         reason = account_application_reason(
-            row, date(2026, 9, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
+            row, tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
         self.assertIsNone(reason)
 
     def test_other_department_on_or_after_cutover_qualifies(self):
         row = {"department": "运营1部", "effective_date": date(2026, 10, 1)}
         reason = account_application_reason(
-            row, date(2026, 10, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
+            row, tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
         self.assertEqual(reason, "新人入职满7天")
+
+    def test_date_unparseable_is_skipped(self):
+        row = {"department": "效能部", "effective_date": None}
+        reason = account_application_reason(
+            row, tech_departments=self.TECH, cutover_date=self.CUTOVER
+        )
+        self.assertIsNone(reason)
 
 
 class BuildAccountApplicationTextTests(unittest.TestCase):
