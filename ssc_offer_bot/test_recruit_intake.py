@@ -132,6 +132,46 @@ class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
         await self.ns['retry_onboarding_confirmations'](retry_event)
         self.ns['queue_group_message'].assert_not_awaited()
 
+    async def test_find_and_replay_recruiter_dm_skips_ssc_own_messages(self):
+        # 真实事故隐患：搜招聘私聊历史时，同一个对话里如果也有SSC自己
+        # 发的消息（out=True）恰好提到候选人姓名，不能被误当成招聘发来的
+        # 那条候选人信息，只认对方(招聘)发的(out=False)。用入职日期字段
+        # 不同来区分两条消息，确认最终生成用的是招聘那条，不是SSC自己的。
+        own_text = self.text.replace('入职日期：9/16', '入职日期：1/1')
+        own_message = NS(raw_text=own_text, id=50, out=True)
+        recruiter_message = NS(raw_text=self.text, id=51, out=False)
+        self.ns['client'].get_messages = AsyncMock(return_value=[own_message, recruiter_message])
+        await self.ns['find_and_replay_recruiter_dm']('小C', self.rec)
+        call = self.ns['queue_group_message'].call_args
+        self.assertIn('入职日期：9/16', call.args[1])
+        self.assertNotIn('入职日期：1/1', call.args[1])
+
+    async def test_retry_after_ssc_favorites_failure_regenerates_without_sender_mismatch(self):
+        # 真实事故复现：SSC把候选人信息粘贴到收藏夹触发生成，当时部门
+        # 领导名单还没配置，生成失败，pending_recruiter_dm记录的sender_id
+        # 是SSC自己（不是招聘）。以前"重试入职确认"会把这条记录连同SSC
+        # 自己的sender_id一起塞给on_private_message重新按"发送者是不是
+        # 招聘"去匹配，必然判定"发送者不匹配"、误报"未进入匹配的待入职
+        # 阶段"，明明候选人状态完全正确。修复后应该直接用记录重新生成，
+        # 不再经过这层身份重新匹配。
+        self.ns['get_leader_tags'] = lambda *a: []
+        self.ns['client'].get_me = AsyncMock(return_value=NS(id=99))
+        event = NS(chat_id=99, sender_id=99, is_private=True, raw_text=self.text,
+                   message=NS(id=205))
+        await self.ns['on_ssc_favorites_candidate_info'](event)
+        self.assertEqual(self.rec['pending_recruiter_dm'], {'sender_id': 99, 'message_id': 205})
+        self.ns['queue_group_message'].assert_not_awaited()
+        notices_before_retry = self.ns['client'].send_message.await_count
+        # 补上部门领导配置后重试。
+        self.ns['get_leader_tags'] = lambda *a: ['leader']
+        self.ns['client'].get_messages = AsyncMock(return_value=NS(raw_text=self.text, id=205))
+        retry_event = NS(chat_id=99, raw_text='重试入职确认', is_private=True, sender_id=99)
+        await self.ns['retry_onboarding_confirmations'](retry_event)
+        self.ns['queue_group_message'].assert_awaited_once()
+        # 不应该再多发一条"未进入匹配的待入职阶段"之类的误报通知。
+        self.assertEqual(self.ns['client'].send_message.await_count, notices_before_retry)
+        self.assertIsNone(self.rec['pending_recruiter_dm'])
+
     async def test_ssc_favorites_paste_with_section_markers_generates_confirmation(self):
         # SSC不等招聘私聊，直接把候选人信息转发/粘贴到自己收藏夹里，带
         # "3️⃣招聘信息"/"4️⃣入职信息"编号小标题，效果应该跟招聘私聊我一样。

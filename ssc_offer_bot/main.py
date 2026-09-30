@@ -2544,6 +2544,17 @@ async def retry_recruit_notifications(event):
 
 # ==================== 场景三：招聘私聊补充信息 -> 发布入职确认 ====================
 async def replay_pending_recruiter_dm(name):
+    """重放一条已经记录下来的候选人信息消息（pending_recruiter_dm），
+    直接调用生成逻辑本身，不经过on_private_message重新匹配身份。
+
+    之前的实现是拼一个"看起来像私聊事件"的SimpleNamespace再丢给
+    on_private_message，让它重新按发送者身份找候选人——这在sender_id
+    正好是招聘本人时凑巧能工作，但pending_recruiter_dm的sender_id也可能
+    是SSC自己（比如候选人信息是SSC粘贴到收藏夹触发的，见
+    on_ssc_favorites_candidate_info），这时on_private_message按"发送者
+    是不是记录里的招聘"去匹配必然失败，会误判成"发送者不匹配"并停止。
+    这里既然已经知道是哪个候选人（按name直接查state），就没必要绕这一
+    圈重新猜身份，直接调用生成逻辑最省事也最不容易出这类bug。"""
     rec = state.get(name) or {}
     pending = rec.get('pending_recruiter_dm')
     if not pending or rec.get('stage') != 'waiting_recruiter_dm':
@@ -2551,9 +2562,8 @@ async def replay_pending_recruiter_dm(name):
     try:
         message = await client.get_messages(pending['sender_id'], ids=pending['message_id'])
         if message:
-            from types import SimpleNamespace
-            await on_private_message(SimpleNamespace(is_private=True, raw_text=message.raw_text,
-                message=message, chat_id=pending['sender_id'], get_sender=message.get_sender))
+            await generate_onboarding_confirmation(name, rec, message.raw_text or '',
+                sender_id=pending['sender_id'], message_id=pending['message_id'])
     except Exception:
         log.exception('[入职确认] %s 提前私聊恢复失败', name)
 
@@ -2564,9 +2574,10 @@ async def find_and_replay_recruiter_dm(name, rec):
     处理失败过，没能被记录下来（比如米娅这次：部门领导名单没配置，那次
     失败发生在这个功能上线前）。这种情况招聘其实已经发过信息了，不需要
     再发一遍：去这个候选人对应招聘（记录里已保存的recruiter_id）的私聊
-    历史里，搜一条提到候选人姓名、且带"招聘信息"或"入职信息"关键词的
-    消息，重放一次。只搜这一个招聘的私聊，不会跟别的招聘或别的候选人
-    的同名消息混在一起。"""
+    历史里，搜一条对方（不是SSC自己）发来的、提到候选人姓名、且带
+    "招聘信息"或"入职信息"关键词的消息，重放一次。只搜这一个招聘的私聊，
+    不会跟别的招聘或别的候选人的同名消息混在一起；排除SSC自己在这个
+    对话里发的消息（not m.out），避免搜到SSC自己转发/回复过的内容。"""
     recruiter_id = rec.get('recruiter_id')
     if not recruiter_id:
         return
@@ -2575,13 +2586,12 @@ async def find_and_replay_recruiter_dm(name, rec):
     except Exception:
         log.exception('[入职确认重试] %s 搜索招聘私聊历史失败', name)
         return
-    match = next((m for m in messages if m and (
+    match = next((m for m in messages if m and not m.out and (
         '招聘信息' in (m.raw_text or '') or '入职信息' in (m.raw_text or ''))), None)
     if not match:
         return
-    from types import SimpleNamespace
-    await on_private_message(SimpleNamespace(is_private=True, raw_text=match.raw_text,
-        message=match, chat_id=recruiter_id, get_sender=match.get_sender))
+    await generate_onboarding_confirmation(name, rec, match.raw_text or '',
+        sender_id=recruiter_id, message_id=match.id)
 
 
 @client.on(events.NewMessage())
