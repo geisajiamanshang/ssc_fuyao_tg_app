@@ -46,6 +46,11 @@ DEPARTMENT_LEADER_TAGS = [
         "dept_keywords": ["运营2部"],
         "leaders": ["DaBai10010", "chuqianyiding", "xxs202215cz2025", "wean4790"],
     },
+    {
+        "org_unit": "运营中心",
+        "dept_keywords": ["AIGC原创部"],
+        "leaders": ["DaBai10010", "chuqianyiding", "wean4790"],
+    },
 ]
 DEFAULT_LEADERS = []
 
