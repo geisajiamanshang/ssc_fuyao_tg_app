@@ -157,39 +157,63 @@ class AccountApplicationReasonTests(unittest.TestCase):
         # 生效日期早于cutover的历史存量，哪怕是研发部/效能部也不处理——
         # 这是根据线上真实测试反馈修正的：之前研发部/效能部会绕过cutover
         # 直接生成，导致本该等到10-1之后才处理的人提前生成了草稿。
+        # today定得足够晚，如果没有cutover这一关，距今天数早就够了——单独
+        # 隔离出cutover这一条件。
         row = {"department": "效能部", "effective_date": date(2026, 9, 30)}
         reason = account_application_reason(
-            row, tech_departments=self.TECH, cutover_date=self.CUTOVER
+            row, date(2026, 10, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
         self.assertIsNone(reason)
 
     def test_tech_department_on_or_after_cutover_qualifies(self):
-        # 生效日期达标就立刻处理，不再额外要求生效满多少天——哪怕就是
-        # cutover当天，也应该生成。
         row = {"department": "效能部", "effective_date": date(2026, 10, 1)}
         reason = account_application_reason(
-            row, tech_departments=self.TECH, cutover_date=self.CUTOVER
+            row, date(2026, 10, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
         self.assertEqual(reason, "新人入职工作需要")
 
     def test_other_department_before_cutover_is_skipped(self):
         row = {"department": "运营1部", "effective_date": date(2026, 9, 30)}
         reason = account_application_reason(
-            row, tech_departments=self.TECH, cutover_date=self.CUTOVER
+            row, date(2026, 10, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
         self.assertIsNone(reason)
 
     def test_other_department_on_or_after_cutover_qualifies(self):
         row = {"department": "运营1部", "effective_date": date(2026, 10, 1)}
         reason = account_application_reason(
-            row, tech_departments=self.TECH, cutover_date=self.CUTOVER
+            row, date(2026, 10, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
         self.assertEqual(reason, "新人入职满7天")
+
+    def test_not_enough_days_elapsed_is_skipped(self):
+        # 生效日期已经过了cutover，但距今还不满min_days天，先不处理。
+        row = {"department": "效能部", "effective_date": date(2026, 10, 1)}
+        reason = account_application_reason(
+            row, date(2026, 10, 3), tech_departments=self.TECH, cutover_date=self.CUTOVER
+        )
+        self.assertIsNone(reason)
+
+    def test_exactly_min_days_elapsed_qualifies(self):
+        # 距今正好等于min_days天（边界值），应该处理。
+        row = {"department": "效能部", "effective_date": date(2026, 10, 1)}
+        reason = account_application_reason(
+            row, date(2026, 10, 7), tech_departments=self.TECH, cutover_date=self.CUTOVER
+        )
+        self.assertEqual(reason, "新人入职工作需要")
+
+    def test_custom_min_days_is_honored(self):
+        row = {"department": "效能部", "effective_date": date(2026, 10, 1)}
+        reason = account_application_reason(
+            row, date(2026, 10, 3), tech_departments=self.TECH,
+            cutover_date=self.CUTOVER, min_days=2,
+        )
+        self.assertEqual(reason, "新人入职工作需要")
 
     def test_date_unparseable_is_skipped(self):
         row = {"department": "效能部", "effective_date": None}
         reason = account_application_reason(
-            row, tech_departments=self.TECH, cutover_date=self.CUTOVER
+            row, date(2026, 10, 10), tech_departments=self.TECH, cutover_date=self.CUTOVER
         )
         self.assertIsNone(reason)
 

@@ -73,12 +73,12 @@ SSC Offer 审批流转自动化 主程序。
   场景十一：SSC在自己的收藏夹发送"帐号申请"
           -> 读取"花名册"和"花名册（机器人）"两张在线Google表格（同名以
              "花名册"为准，冲突名单静默按"花名册"处理，不再提示收藏夹），
-             筛出生效日期>=2026-10-1（不论部门，历史存量不处理，达标即处理，
-             不再额外要求生效满多少天）、且工作TG(AD列)还没换成真正工作
-             TG——AD列空白、填"同上"这类占位文字、或者跟AE列(私人联系方式)
-             完全相同都算——的人，按部门套用理由和格式（研发部/效能部"新人
-             入职工作需要"，套【员工账号申请】格式；其他部门"新人入职满7
-             天"，套【员工工作帐号申请】格式）分别生成草稿发到收藏夹
+             筛出生效日期>=2026-10-1（不论部门，历史存量不处理）且距今>=6
+             天、且工作TG(AD列)还没换成真正工作TG——AD列空白、填"同上"这类
+             占位文字、或者跟AE列(私人联系方式)完全相同都算——的人，按部门
+             套用理由和格式（研发部/效能部"新人入职工作需要"，套【员工账号
+             申请】格式；其他部门"新人入职满7天"，套【员工工作帐号申请】
+             格式）分别生成草稿发到收藏夹
           -> SSC发送111统一放行本轮全部草稿：逐条间隔随机5-10秒转发到
              工作帐号需求群-SSC3组，每条发送成功后立即删除对应收藏夹草稿
 
@@ -725,11 +725,12 @@ async def on_ssc_account_application_trigger(event):
     触发：读取"花名册"和"花名册（机器人）"两张在线Google表格（同名以"花名
     册"为准，冲突名单静默按"花名册"处理，不再发收藏夹提示，只记日志），
     筛出生效日期>=ACCOUNT_APPLICATION_CUTOVER_DATE（不论部门，早于这个
-    日期的历史存量不处理；日期达标即处理，不再额外要求生效满多少天）、且
-    工作TG(AD列)还没换成真正工作TG——AD列空白、填"同上"这类占位文字、或者
-    跟私人联系方式(AE列)完全相同都算——的人，按部门套用理由和格式（研发部/
-    效能部"新人入职工作需要"，套【员工账号申请】格式；其他部门"新人入职满
-    7天"，套【员工工作帐号申请】格式）分别生成草稿发到收藏夹。SSC统一发送
+    日期的历史存量不处理）且距今>=ACCOUNT_APPLICATION_MIN_DAYS_SINCE_
+    EFFECTIVE天、且工作TG(AD列)还没换成真正工作TG——AD列空白、填"同上"这
+    类占位文字、或者跟私人联系方式(AE列)完全相同都算——的人，按部门套用
+    理由和格式（研发部/效能部"新人入职工作需要"，套【员工账号申请】格式；
+    其他部门"新人入职满7天"，套【员工工作帐号申请】格式）分别生成草稿发到
+    收藏夹。SSC统一发送
     ACCOUNT_APPLICATION_APPROVAL_CODE（111/测试111）一次性放行全部草稿，
     见on_ssc_account_application_release；这一步是发起新一轮生成，不是
     释放某条已排队的草稿，所以不放进APPROVAL_CODES，用独立监听器单独识别。
@@ -787,8 +788,9 @@ async def on_ssc_account_application_trigger(event):
             if not needs_account_application(row):
                 continue
             reason = account_application_reason(
-                row, tech_departments=config.ACCOUNT_APPLICATION_TECH_DEPARTMENTS,
+                row, today, tech_departments=config.ACCOUNT_APPLICATION_TECH_DEPARTMENTS,
                 cutover_date=cutover_date,
+                min_days=config.ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE,
             )
             if reason is None:
                 continue

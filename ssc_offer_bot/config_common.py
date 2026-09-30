@@ -139,10 +139,11 @@ ONEHR_LOGIN_PASSWORD = os.environ.get("ONEHR_LOGIN_PASSWORD", "").strip()
 # 在线Google表格（真实地址记在花名册Drive文件夹里的"共享资源地址.rtf"，
 # 不是文件夹本身直接放着这两张表，所以这里直接记录解析出来的表格ID/分页
 # gid，不依赖每次现读那份说明文件），筛出生效日期>=ACCOUNT_APPLICATION_
-# CUTOVER_DATE（不论部门，早于这个日期的历史存量不处理；日期达标即处理，
-# 不再额外要求生效满多少天）、且工作TG(AD列)还没换成真正工作TG的人——具体
-# 表现为AD列空白、填的是"同上"这类占位文字、或者跟AE列(私人联系方式)完全
-# 相同；同名以"花名册"为准，重复名单静默按"花名册"处理，不再发收藏夹提示。
+# CUTOVER_DATE（不论部门，早于这个日期的历史存量不处理）且距今>=
+# ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE天、且工作TG(AD列)还没换成
+# 真正工作TG的人——具体表现为AD列空白、填的是"同上"这类占位文字、或者跟
+# AE列(私人联系方式)完全相同；同名以"花名册"为准，重复名单静默按"花名册"
+# 处理，不再发收藏夹提示。
 # 按O列部门套理由：研发部/效能部固定"新人入职工作需要"，套用【员工账号
 # 申请】格式；其他部门"新人入职满7天"，套用
 # 【员工工作帐号申请】格式——两种格式都是照抄"帐号申请助手/模版.rtf"里
@@ -179,6 +180,9 @@ ACCOUNT_APPLICATION_TECH_DEPARTMENTS = ("研发部", "效能部")
 # 不论部门，只对生效日期>=这个日期起的人生效；历史存量（哪怕是研发部/
 # 效能部）不在本次自动化范围内，需要的话人工处理。
 ACCOUNT_APPLICATION_CUTOVER_DATE = "2026-10-01"
+# 生效日期还必须距今>=这么多天才处理——刚生效没几天，工作TG可能还没来得及
+# 配置，先不打扰。
+ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE = 6
 
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({

@@ -87,6 +87,7 @@ def base_config(**overrides):
         ACCOUNT_APPLICATION_APPROVAL_CODE="测试111",
         ACCOUNT_APPLICATION_TECH_DEPARTMENTS=("研发部", "效能部"),
         ACCOUNT_APPLICATION_CUTOVER_DATE="2026-10-01",
+        ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE=6,
         DAILY_REPORT_TIMEZONE="Asia/Shanghai",
         GROUP_ACCOUNT_REQUEST_WORK=-5309896717,
         ALLOWED_DESTINATION_IDS={-5309896717},
@@ -157,8 +158,9 @@ def fav_event(text, msg_id=1):
 
 class AccountApplicationTriggerTests(IsolatedAsyncioTestCase):
     def setUp(self):
-        # 冻结"今天"=2026-10-10（见FakeDateTime）。cutover=2026-10-01不论
-        # 部门都要满足，达标即处理，不再额外要求生效满多少天。
+        # 冻结"今天"=2026-10-10（见FakeDateTime）。cutover=2026-10-01和
+        # min_days=6两个条件都要满足：生效日期"2026-10-01"距今天10-10正好
+        # 9天，两条都满足。
         # 廖伊波：效能部，生效日期在cutover当天，AD==AE（还没申请）→ 应该
         # 生成【员工账号申请】草稿。
         # 张三：运营1部，生效日期在cutover(2026-10-01)之前 → 按理由判断跳过。
@@ -207,6 +209,18 @@ class AccountApplicationTriggerTests(IsolatedAsyncioTestCase):
         rows = roster_sheet_rows(
             data_row(name="阿林", effective_date="2026-09-01", department="效能部",
                      work_tg="@alin65175", personal_contact="@alin65175"),
+        )
+        env = build_env(primary_rows=rows, secondary_rows=self.secondary_rows)
+        await env['on_ssc_account_application_trigger'](fav_event('帐号申请'))
+        self.assertEqual(len(env['_sent']), 1)
+        self.assertIn('没有找到需要处理的人', env['_sent'][0][1])
+
+    async def test_not_enough_days_elapsed_is_excluded(self):
+        # SSC反馈需要恢复"生效满6天"限制：生效日期已经过了cutover，但距
+        # 今(2026-10-10)不满6天的，先不处理。
+        rows = roster_sheet_rows(
+            data_row(name="大华", effective_date="2026-10-08", department="效能部",
+                     work_tg="", personal_contact="@dahua123"),
         )
         env = build_env(primary_rows=rows, secondary_rows=self.secondary_rows)
         await env['on_ssc_account_application_trigger'](fav_event('帐号申请'))

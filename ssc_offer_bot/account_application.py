@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """帐号申请自动化：SSC收藏夹出现"帐号申请"后，读取"花名册"和"花名册（机器
-人）"两张在线Google表格，找出生效日期>=cutover_date（不论部门，不再额外
-要求生效满多少天——SSC反馈日期达标就该立刻处理）、但工作TG(AD列)还没换成
-真正工作TG的人——具体表现为AD列空白、填的是"同上"这类占位文字、或者跟
-私人联系方式(AE列)完全相同，按部门套用不同理由和不同的消息格式，分别
-生成账号申请草稿。
+人）"两张在线Google表格，找出生效日期>=cutover_date（不论部门）且距今>=
+min_days天（默认6天）、但工作TG(AD列)还没换成真正工作TG的人——具体表现为
+AD列空白、填的是"同上"这类占位文字、或者跟私人联系方式(AE列)完全相同，
+按部门套用不同理由和不同的消息格式，分别生成账号申请草稿。
 
 纯逻辑（两表合并/筛选/理由判断/文案拼装）单独放在这里，不涉及Telegram
 调用，方便独立测试；Drive/Sheets读取复用service_account凭证，只是比
@@ -110,9 +109,9 @@ def needs_account_application(candidate):
     """工作TG(AD)还没换成真正的工作TG——具体表现为以下任意一种：完全空白、
     填的是"同上"这类占位文字、或者跟私人联系方式(AE)完全相同（说明只是
     把AE抄了一遍占位）。工作TG已经填了具体的、跟AE不同的内容，才认为已经
-    申请过，不处理。是否在本次自动化处理范围内（生效日期>=cutover_date）
-    由account_application_reason()单独判断，这里不判断生效日期——按SSC
-    反馈，只要生效日期达标就立刻处理，不再额外要求生效满多少天。
+    申请过，不处理。是否在本次自动化处理范围内（生效日期>=cutover_date
+    且距今>=min_days天）由account_application_reason()单独判断，这里不
+    判断生效日期。
     """
     work_tg = (candidate.get("work_tg") or "").strip()
     if not work_tg:
@@ -132,14 +131,17 @@ def is_tech_department(candidate, *, tech_departments):
     return any(keyword in department for keyword in tech_departments)
 
 
-def account_application_reason(candidate, *, tech_departments, cutover_date):
-    """不论部门，生效日期都必须>=cutover_date才处理（早于这个日期的历史
-    存量不在本次自动化范围内，返回None表示本次不处理这个人）；生效日期
-    达标后，研发部/效能部理由固定"新人入职工作需要"，其他部门理由是
-    "新人入职满7天"。
+def account_application_reason(candidate, today, *, tech_departments, cutover_date, min_days=6):
+    """不论部门，必须同时满足两个日期条件才处理：F列生效日期>=cutover_date
+    （早于这个日期的历史存量不在本次自动化范围内），且生效日期距今>=
+    min_days天（刚生效没多久，HR/员工本人可能还没来得及配置工作TG，先不
+    打扰）。都满足后，研发部/效能部理由固定"新人入职工作需要"，其他部门
+    理由是"新人入职满7天"；不满足任一条件返回None，表示本次不处理这个人。
     """
     effective = candidate.get("effective_date")
     if effective is None or effective < cutover_date:
+        return None
+    if (today - effective).days < min_days:
         return None
     if is_tech_department(candidate, tech_departments=tech_departments):
         return "新人入职工作需要"
