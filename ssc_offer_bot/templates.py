@@ -34,9 +34,9 @@ def build_recruit_reply_message(
         f"转正薪资：{salary_confirm}\n"
         f"试用期：{probation_period}\n"
         f"试用薪资：{salary_probation}\n\n"
-        f"@{recruiter_username}   Offer审批已通过，请跟进候选人确认招聘信息和入职信息，"
+        f"@{recruiter_username} Offer审批已通过，请跟进候选人确认招聘信息和入职信息，"
         f"为防止隐私泄漏，请招聘私聊我，谢谢\n"
-        f"@{hrbp_username}    请知悉"
+        f"@{hrbp_username} 请知悉"
     )
 
 

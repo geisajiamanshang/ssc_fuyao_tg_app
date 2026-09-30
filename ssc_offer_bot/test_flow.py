@@ -95,6 +95,24 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('入职日期：2026-09-20',result)
         self.assertIn('试用期：3个月',build_recruit_reply_message('小仙','运营','16K','12K','hr','bp','3个月'))
 
+    def test_recruit_reply_mention_spacing_matches_template(self):
+        # SSC反馈：发到招聘群的通知里，@招聘和@hrbp后面多出了2-3个空格，
+        # 跟公司模板不一致（模板里@后面只有一个空格）。
+        from templates import build_recruit_reply_message
+        text = build_recruit_reply_message(
+            '张瑞杰', 'AI测试工程师', '20K', '18K', 'liduola5214', 'linerkang', '2个月',
+        )
+        self.assertEqual(text, (
+            '简历名：张瑞杰\n'
+            '职位： AI测试工程师\n'
+            '转正薪资：20K\n'
+            '试用期：2个月\n'
+            '试用薪资：18K\n\n'
+            '@liduola5214 Offer审批已通过，请跟进候选人确认招聘信息和入职信息，'
+            '为防止隐私泄漏，请招聘私聊我，谢谢\n'
+            '@linerkang 请知悉'
+        ))
+
     def test_effect_leaders_and_combined_department(self):
         config.DEPARTMENT_LEADER_TAGS=[
             {'org_unit':'效能中心','dept_keywords':[''],'leaders':['DaBai10010','chuqianyiding','wean4790']},
