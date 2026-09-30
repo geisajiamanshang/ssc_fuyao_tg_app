@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from account_application import (
     account_application_reason,
+    account_application_text_from_onboarding,
     build_account_application_text,
     is_tech_department,
     merge_rosters,
@@ -19,6 +20,7 @@ from account_application import (
     parse_roster_rows,
 )
 from approval_queue import select_pending
+from parsers import get_field, parse_kv_fields
 
 
 def roster_sheet_rows(*data_rows):
@@ -88,11 +90,15 @@ def base_config(**overrides):
         ACCOUNT_APPLICATION_TECH_DEPARTMENTS=("研发部", "效能部"),
         ACCOUNT_APPLICATION_CUTOVER_DATE="2026-10-01",
         ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE=6,
+        ACCOUNT_APPLICATION_FROM_ONBOARDING_ENABLED=True,
         DAILY_REPORT_TIMEZONE="Asia/Shanghai",
+        GROUP_LEADERSHIP=-100111,
         GROUP_ACCOUNT_REQUEST_WORK=-5309896717,
         ALLOWED_DESTINATION_IDS={-5309896717},
         APPROVAL_CODES=frozenset({"测试1"}),
-        OFFER_APPROVAL_CODE="测试1", ENVIRONMENT="test",
+        OFFER_APPROVAL_CODE="测试1",
+        PRE_ONBOARDING_APPROVAL_CODE="测试11",
+        ENVIRONMENT="test",
     )
     fields.update(overrides)
     return NS(**fields)
@@ -154,6 +160,147 @@ def build_env(*, primary_rows, secondary_rows, load_error=None, **overrides):
 def fav_event(text, msg_id=1):
     return NS(chat_id=9, is_private=True, sender_id=9, raw_text=text,
               message=NS(id=msg_id))
+
+
+def onboarding_message(text, msg_id=1, sender_id=9):
+    return NS(raw_text=text, id=msg_id, sender_id=sender_id)
+
+
+def build_onboarding_env(**overrides):
+    """给 forward_onboarding_to_account_application 单独搭一套执行环境：跟
+    build_env() 提取的handler不同，这个函数依赖 queue_group_message、
+    parse_kv_fields/get_field、account_application_text_from_onboarding，
+    以及一份独立的去重StateStore（account_application_onboarding_forwards）
+    和锁，跟花名册扫描那条路径完全不共用状态。
+    """
+    source = ast.parse(Path(__file__).with_name('main.py').read_text())
+    functions = [n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+                 and n.name in {'forward_onboarding_to_account_application',
+                                'get_ssc_reviewer', 'queue_group_message'}]
+    for node in functions:
+        node.decorator_list = []
+
+    sent = []
+
+    async def send_message(destination, text, **kwargs):
+        sent.append((destination, text, kwargs.get('file')))
+        return NS(id=100 + len(sent))
+
+    me = NS(id=9, username='ffuuyao')
+
+    client = NS(
+        get_me=AsyncMock(return_value=me),
+        send_message=send_message,
+        get_messages=AsyncMock(),
+        delete_messages=AsyncMock(),
+    )
+
+    env = dict(
+        account_application_text_from_onboarding=account_application_text_from_onboarding,
+        parse_kv_fields=parse_kv_fields, get_field=get_field,
+        select_pending=select_pending,
+        asyncio=asyncio, datetime=FakeDateTime, ZoneInfo=ZoneInfo,
+        log=logging.getLogger('test'),
+        client=client,
+        outbox=MemoryStore(), state=MemoryStore(),
+        ssc_send_lock=asyncio.Lock(),
+        account_application_onboarding_forwards=MemoryStore(),
+        account_application_onboarding_lock=asyncio.Lock(),
+        config=base_config(),
+    )
+    env.update(overrides)
+    exec(compile(ast.Module(body=functions, type_ignores=[]), 'main.py', 'exec'), env)
+    env['_sent'] = sent
+    env['_client'] = client
+    return env
+
+
+class ForwardOnboardingToAccountApplicationTests(IsolatedAsyncioTestCase):
+    """联合管理群贴出入职信息确认后，入职部门是研发部/效能部时直接生成一条
+    【员工账号申请】草稿，复用预入职登记的审批码(测试11/11)放行到工作帐号
+    需求群-SSC3组——这条路径完全独立于花名册扫描(帐号申请自动化)，不看
+    生效日期/天数。
+    """
+
+    def _text(self, **fields):
+        defaults = {
+            "候选人编码": "DN6284",
+            "候选人姓名": "木梨",
+            "简历名": "muli",
+            "入职编制组织": "技术中心",
+            "入职服务单位": "恒睿",
+            "入职部门": "效能部",
+            "候选人联系方式": "@muli_q",
+        }
+        defaults.update(fields)
+        return "【入职信息确认】\n" + "\n".join(f"{k}：{v}" for k, v in defaults.items())
+
+    async def test_tech_department_queues_draft_with_pre_onboarding_code(self):
+        env = build_onboarding_env()
+        await env['forward_onboarding_to_account_application'](
+            onboarding_message(self._text()), -100111,
+        )
+        drafts = [t for d, t, _f in env['_sent'] if d == 9]
+        self.assertEqual(len(drafts), 1)
+        self.assertTrue(drafts[0].startswith('【员工账号申请】'))
+        self.assertIn('编号：DN6284', drafts[0])
+        self.assertIn('花名：木梨', drafts[0])
+        self.assertIn('简历名：muli', drafts[0])
+        self.assertIn('需求：TG×1、邮箱×1', drafts[0])
+        self.assertIn('联系TG：@muli_q', drafts[0])
+
+        records = [r for r in env['outbox'].all().values()
+                   if r['kind'] == 'account_application_onboarding']
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]['destination'], -5309896717)
+        self.assertEqual(records[0]['approval_code'], '测试11')
+
+    async def test_non_tech_department_does_not_queue(self):
+        env = build_onboarding_env()
+        await env['forward_onboarding_to_account_application'](
+            onboarding_message(self._text(入职部门="运营1部")), -100111,
+        )
+        self.assertEqual(env['_sent'], [])
+        self.assertEqual(env['outbox'].all(), {})
+
+    async def test_disabled_flag_skips(self):
+        env = build_onboarding_env(
+            config=base_config(ACCOUNT_APPLICATION_FROM_ONBOARDING_ENABLED=False)
+        )
+        await env['forward_onboarding_to_account_application'](
+            onboarding_message(self._text()), -100111,
+        )
+        self.assertEqual(env['_sent'], [])
+
+    async def test_other_chat_is_ignored(self):
+        env = build_onboarding_env()
+        await env['forward_onboarding_to_account_application'](
+            onboarding_message(self._text()), -999,
+        )
+        self.assertEqual(env['_sent'], [])
+
+    async def test_message_without_keyword_is_ignored(self):
+        env = build_onboarding_env()
+        await env['forward_onboarding_to_account_application'](
+            onboarding_message("跟入职确认无关的一条消息"), -100111,
+        )
+        self.assertEqual(env['_sent'], [])
+
+    async def test_message_from_other_sender_is_ignored(self):
+        # 只处理登录账号自己发布的入职确认，不是别人在联合管理群发的其他消息。
+        env = build_onboarding_env()
+        await env['forward_onboarding_to_account_application'](
+            onboarding_message(self._text(), sender_id=42), -100111,
+        )
+        self.assertEqual(env['_sent'], [])
+
+    async def test_duplicate_message_is_not_queued_twice(self):
+        env = build_onboarding_env()
+        msg = onboarding_message(self._text(), msg_id=7)
+        await env['forward_onboarding_to_account_application'](msg, -100111)
+        await env['forward_onboarding_to_account_application'](msg, -100111)
+        drafts = [t for d, t, _f in env['_sent'] if d == 9]
+        self.assertEqual(len(drafts), 1)
 
 
 class AccountApplicationTriggerTests(IsolatedAsyncioTestCase):

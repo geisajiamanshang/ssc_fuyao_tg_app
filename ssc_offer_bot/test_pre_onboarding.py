@@ -43,6 +43,10 @@ def build_env(**overrides):
         select_pending=select_pending, parse_kv_fields=parse_kv_fields, get_field=get_field,
         get_leader_tags=lambda *a, **kw: ['leader'],
         forward_onboarding_to_hrgs=AsyncMock(),
+        # 账号申请(入职触发)那条路径有自己独立的测试文件
+        # (test_account_application_handler.py)，这里只关心预入职登记
+        # 排队这一件事，所以用AsyncMock占位，不拉进真实实现。
+        forward_onboarding_to_account_application=AsyncMock(),
         pre_onboarding_queue_forwards=MemoryStore(),
         pre_onboarding_queue_lock=asyncio.Lock(),
         asyncio=asyncio, log=logging.getLogger('test'),

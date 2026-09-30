@@ -15,9 +15,28 @@ daily_reports.py里其它功能用的drive.readonly多加了spreadsheets.readonl
 研发部/效能部用【员工账号申请】格式，其他部门用【员工工作帐号申请】格式，
 "申请原因"按account_application_reason()的判断结果填入，不是照抄例子里的
 原文。
+
+另有一条独立触发路径（跟上面花名册扫描无关）：联合管理群贴出"入职信息
+确认"消息后，如果入职部门是研发部/效能部，直接从这条消息本身的字段生成
+一条【员工账号申请】草稿——新人入职当天就需要同时开通工作TG和邮箱两个
+帐号，不用像花名册扫描那样等生效日期和天数达标，"需求"也相应固定为
+"TG×1、邮箱×1"而不是"TG×1"。见 account_application_text_from_onboarding()。
 """
 
 from datetime import datetime
+
+from parsers import get_field, parse_kv_fields
+
+# 联合管理群"入职信息确认"消息里没有独立的"花名"/"简历名"字段名，但
+# main.py其它地方已经确立了这个取值顺序（先找专门字段，没有就退回到
+# "候选人姓名"）：matches_recruit_candidate()/handle_offer_confirmation()
+# 等都是 get_field(fields, "简历名", "候选人姓名")。这里原样复用同一套
+# 顺序，"花名"这一侧同理补一个 get_field(fields, "花名", "候选人姓名")，
+# 这样如果原Offer文本里确实分别写了"花名"和"简历名"两行（不同值，例如
+# 中文花名和拼音简历名），能各自取到；如果只写了"候选人姓名"一行，两个
+# 字段就会取到同一个值——跟花名册扫描那条路径里"简历名"缺失时回退到
+# "花名"是同一个道理。
+ONBOARDING_ACCOUNT_APPLICATION_DEMAND = "TG×1、邮箱×1"
 
 # 花名册两张表的字段位置（电子表格列字母），两表结构完全一致：正文表头在
 # 第3行（前两行是"在职花名册"标题行和分组表头），从第4行开始是数据。
@@ -155,13 +174,14 @@ def _contact_tg(candidate):
     return contact if contact.startswith("@") else "@" + contact.lstrip("@")
 
 
-def build_account_application_text(candidate, reason, *, is_tech, today=None):
+def build_account_application_text(candidate, reason, *, is_tech, today=None, demand="TG×1"):
     """按"帐号申请助手/模版.rtf"里对应部门类型的真实格式拼草稿文本：
     研发部/效能部用【员工账号申请】格式（申请日期在最前面，多一个"简历名"
     字段）；其他部门用【员工工作帐号申请】格式（多一个"申请数量"字段，
-    申请日期在最后）。"需求"统一填"TG×1"，因为这个自动化本身就是在补
-    工作TG这一项；"申请原因"用account_application_reason()的判断结果，
-    不是照抄模版例子里的原文。
+    申请日期在最后）。"需求"默认"TG×1"，因为花名册扫描这条路径本身就是在
+    补工作TG这一项；入职信息确认触发的那条路径需要同时开通TG和邮箱，会传
+    demand="TG×1、邮箱×1"覆盖默认值。"申请原因"用调用方传入的reason，不是
+    照抄模版例子里的原文。
     """
     today = today or datetime.now().date().isoformat()
     org_unit = candidate.get("org_unit") or "待补充"
@@ -181,7 +201,7 @@ def build_account_application_text(candidate, reason, *, is_tech, today=None):
             f"编号：{employee_code}\n"
             f"花名：{name}\n"
             f"简历名：{resume_name}\n"
-            "需求：TG×1\n"
+            f"需求：{demand}\n"
             f"申请原因：{reason}\n"
             f"联系TG：{contact_tg}"
         )
@@ -192,11 +212,36 @@ def build_account_application_text(candidate, reason, *, is_tech, today=None):
         f"部门：{department}\n"
         f"花名：{name}\n"
         f"员工编号：{employee_code}\n"
-        "需求：TG×1\n"
+        f"需求：{demand}\n"
         f"申请原因：{reason}\n"
         "申请数量：1个\n"
         f"联系TG：{contact_tg}\n"
         f"申请日期：{today}"
+    )
+
+
+def account_application_text_from_onboarding(text, *, tech_departments, today=None):
+    """联合管理群贴出的"入职信息确认"消息触发：入职部门是研发部/效能部时，
+    直接从这条消息本身的字段生成一条【员工账号申请】草稿（新人入职当天就
+    要同时开通工作TG和邮箱，不用等花名册生效日期/天数达标，跟
+    account_application_reason()那条花名册扫描路径是两回事，互不影响）。
+    入职部门不是研发部/效能部时返回None，表示这条消息不生成账号申请草稿。
+    """
+    fields = parse_kv_fields(text)
+    department = get_field(fields, "入职部门") or ""
+    if not any(keyword in department for keyword in tech_departments):
+        return None
+    candidate = {
+        "name": get_field(fields, "花名", "候选人姓名"),
+        "resume_name": get_field(fields, "简历名", "候选人姓名"),
+        "org_unit": get_field(fields, "入职编制组织", "编制组织"),
+        "service_unit": get_field(fields, "入职服务单位"),
+        "employee_code": get_field(fields, "候选人编码"),
+        "personal_contact": get_field(fields, "候选人联系方式"),
+    }
+    return build_account_application_text(
+        candidate, "新人入职工作需要", is_tech=True, today=today,
+        demand=ONBOARDING_ACCOUNT_APPLICATION_DEMAND,
     )
 
 

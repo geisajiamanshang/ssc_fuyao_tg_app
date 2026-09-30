@@ -107,6 +107,11 @@ ACCOUNT_APPLICATION_ENABLED = bool(
     and ACCOUNT_APPLICATION_ROSTER_BOT_SPREADSHEET_ID
     and GROUP_ACCOUNT_REQUEST_WORK
 )
+# 入职信息确认发布到联合管理群后，如果入职部门是研发部/效能部，额外生成
+# 一条【员工账号申请】草稿（同时开通TG和邮箱），复用预入职登记的审批码
+# （11/测试11）放行到工作帐号需求群-SSC3组；工作帐号需求群ID配置好之前
+# 自动跳过，不报错也不误发。
+ACCOUNT_APPLICATION_FROM_ONBOARDING_ENABLED = bool(GROUP_ACCOUNT_REQUEST_WORK)
 # 离职助手/输出 Drive文件夹ID配置好之前，离职审批功能整体自动跳过；
 # 83的第二个目标群（GROUP_OFFBOARDING_BUSINESS_SYNC）、84的目标群
 # （GROUP_ACCOUNT_REQUEST_WORK）各自缺失时只跳过对应那一步，不影响其余。

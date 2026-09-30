@@ -3,6 +3,7 @@ from datetime import date
 
 from account_application import (
     account_application_reason,
+    account_application_text_from_onboarding,
     build_account_application_text,
     is_tech_department,
     merge_rosters,
@@ -261,6 +262,86 @@ class BuildAccountApplicationTextTests(unittest.TestCase):
         self.assertIn("联系TG：@yibai7798", text)  # 自动补上@前缀
         self.assertIn("申请日期：2026-09-02", text)
         self.assertNotIn("简历名", text)
+
+    def test_demand_parameter_overrides_default(self):
+        row = {
+            "name": "廖伊波", "resume_name": "廖伊波", "org_unit": "效能中心",
+            "service_unit": "恒睿", "employee_code": "NX4325",
+            "personal_contact": "@heather80130",
+        }
+        text = build_account_application_text(
+            row, "新人入职工作需要", is_tech=True, today="2026-09-03",
+            demand="TG×1、邮箱×1",
+        )
+        self.assertIn("需求：TG×1、邮箱×1", text)
+
+    def test_demand_defaults_to_tg_only_when_omitted(self):
+        row = {"name": "廖伊波", "org_unit": "效能中心", "service_unit": "恒睿"}
+        text = build_account_application_text(
+            row, "新人入职工作需要", is_tech=True, today="2026-09-03"
+        )
+        self.assertIn("需求：TG×1\n", text)
+
+
+class AccountApplicationTextFromOnboardingTests(unittest.TestCase):
+    """入职信息确认发布到联合管理群后，入职部门是研发部/效能部时直接从这
+    条消息生成【员工账号申请】草稿——跟花名册扫描(account_application_
+    reason)是完全独立的另一条路径，不看生效日期/天数，需求固定
+    "TG×1、邮箱×1"。
+    """
+
+    TECH = ("研发部", "效能部")
+
+    def _text(self, **fields):
+        defaults = {
+            "候选人编码": "DN6284",
+            "候选人姓名": "木梨",
+            "入职编制组织": "技术中心",
+            "入职服务单位": "恒睿",
+            "入职部门": "效能部",
+            "候选人联系方式": "@muli_q",
+        }
+        defaults.update(fields)
+        return "\n".join(f"{k}：{v}" for k, v in defaults.items())
+
+    def test_tech_department_generates_draft_matching_real_example(self):
+        text = self._text(简历名="muli")
+        draft = account_application_text_from_onboarding(
+            text, tech_departments=self.TECH, today="2026-09-30"
+        )
+        self.assertTrue(draft.startswith("【员工账号申请】"))
+        self.assertIn("申请日期：2026-09-30", draft)
+        self.assertIn("编制组织：技术中心", draft)
+        self.assertIn("服务单位：恒睿", draft)
+        self.assertIn("编号：DN6284", draft)
+        self.assertIn("花名：木梨", draft)
+        self.assertIn("简历名：muli", draft)
+        self.assertIn("需求：TG×1、邮箱×1", draft)
+        self.assertIn("申请原因：新人入职工作需要", draft)
+        self.assertIn("联系TG：@muli_q", draft)
+
+    def test_resume_name_falls_back_to_candidate_name_when_missing(self):
+        # 原文没有单独一行"简历名"时，简历名/花名都退回到"候选人姓名"。
+        text = self._text()
+        draft = account_application_text_from_onboarding(
+            text, tech_departments=self.TECH, today="2026-09-30"
+        )
+        self.assertIn("花名：木梨", draft)
+        self.assertIn("简历名：木梨", draft)
+
+    def test_non_tech_department_returns_none(self):
+        text = self._text(入职部门="运营1部")
+        draft = account_application_text_from_onboarding(
+            text, tech_departments=self.TECH, today="2026-09-30"
+        )
+        self.assertIsNone(draft)
+
+    def test_missing_department_field_returns_none(self):
+        text = "候选人姓名：木梨\n候选人编码：DN6284"
+        draft = account_application_text_from_onboarding(
+            text, tech_departments=self.TECH, today="2026-09-30"
+        )
+        self.assertIsNone(draft)
 
 
 if __name__ == "__main__":

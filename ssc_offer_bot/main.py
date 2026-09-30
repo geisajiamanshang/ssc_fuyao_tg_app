@@ -22,6 +22,9 @@ SSC Offer 审批流转自动化 主程序。
   场景四：联合管理工作群的入职信息确认发布成功后
           -> 再次经收藏夹审批（测试11/11）
           -> 放行后原样转发到预入职登记群
+          -> 如果入职部门是研发部/效能部，同时额外生成一条【员工账号申请】
+             草稿（需求固定"TG×1、邮箱×1"），复用同一个审批码测试11/11，
+             放行后转发到工作帐号需求群-SSC3组，与预入职登记互不影响
 
   场景五：转正提醒-恒睿-转正倒数4天 触发后
           -> 转正申请单独经收藏夹审批（测试21/21，与预转正提醒的审批码2并存）
@@ -147,6 +150,7 @@ from account_request import (
 from account_application import (
     AccountApplicationSheetsRepository,
     account_application_reason,
+    account_application_text_from_onboarding,
     build_account_application_text,
     is_tech_department,
     merge_rosters,
@@ -196,6 +200,10 @@ hrgs_forward_lock = asyncio.Lock()
 HRGS_BOT_USERNAME = "HRGS_ssc_bot"
 pre_onboarding_queue_forwards = StateStore(config.DB_PATH + ".pre_onboarding_forward.json")
 pre_onboarding_queue_lock = asyncio.Lock()
+account_application_onboarding_forwards = StateStore(
+    config.DB_PATH + ".account_application_onboarding_forward.json"
+)
+account_application_onboarding_lock = asyncio.Lock()
 daily_report_state = StateStore(config.DAILY_REPORT_STATE_PATH)
 regularization_events = StateStore(config.REGULARIZATION_STATE_PATH)
 regularization_lock = asyncio.Lock()
@@ -290,12 +298,65 @@ async def forward_onboarding_to_pre_onboarding_queue(message, chat_id):
     pre_onboarding_queue_forwards.update(key, status="queued")
 
 
+async def forward_onboarding_to_account_application(message, chat_id):
+    """联合管理群一出现入职确认，如果入职部门是研发部/效能部，额外生成一条
+    【员工账号申请】草稿（新人入职当天要同时开通工作TG和邮箱），送SSC收藏
+    夹，复用预入职登记同一个审批码（PRE_ONBOARDING_APPROVAL_CODE，测试
+    11/11）放行到工作帐号需求群-SSC3组——跟forward_onboarding_to_pre_
+    onboarding_queue是同一个候选人状态机之外单独的一份去重记录，两者互不
+    影响；不管这条入职确认是场景三正常审批流程发的，还是SSC自己手动直接
+    发到联合管理群的，只要联合管理群里出现了这条消息，这一步都要跑。
+    """
+    if not config.ACCOUNT_APPLICATION_FROM_ONBOARDING_ENABLED:
+        return
+    if chat_id != config.GROUP_LEADERSHIP:
+        return
+    text = message.raw_text or ""
+    compact = "".join(text.split())
+    if "入职信息确认" not in compact:
+        return
+    me = await client.get_me()
+    if message.sender_id != me.id:
+        return
+    key = f"{chat_id}:{message.id}"
+    async with account_application_onboarding_lock:
+        if account_application_onboarding_forwards.get(key):
+            return
+        account_application_onboarding_forwards.set(key, {"status": "checking"})
+    today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date().isoformat()
+    try:
+        draft_text = account_application_text_from_onboarding(
+            text, tech_departments=config.ACCOUNT_APPLICATION_TECH_DEPARTMENTS, today=today,
+        )
+        if draft_text is None:
+            account_application_onboarding_forwards.update(key, status="skipped_not_tech")
+            return
+        candidate = get_field(parse_kv_fields(text), "候选人姓名") or str(message.id)
+        await queue_group_message(
+            config.GROUP_ACCOUNT_REQUEST_WORK, draft_text,
+            candidate=f"account_application_onboarding:{key}:{candidate}",
+            expected_stage="waiting_ssc_account_application_onboarding",
+            updates={"stage": "account_application_onboarding_sent"},
+            kind="account_application_onboarding",
+            approval_code=config.PRE_ONBOARDING_APPROVAL_CODE,
+            delete_draft_after_send=True,
+        )
+        account_application_onboarding_forwards.update(key, status="queued")
+        log.info(
+            "[入职账号申请] %s 已生成草稿，等待SSC发送%s放行到工作帐号需求群-SSC3组",
+            key, config.PRE_ONBOARDING_APPROVAL_CODE,
+        )
+    except Exception:
+        log.exception("[入职账号申请] %s 处理失败", key)
+
+
 @client.on(events.NewMessage(chats=config.GROUP_LEADERSHIP, outgoing=True))
 async def on_ssc_onboarding_published(event):
     if event.chat_id in config.EXCLUDED_CHAT_IDS:
         return
     await forward_onboarding_to_hrgs(event.message, event.chat_id)
     await forward_onboarding_to_pre_onboarding_queue(event.message, event.chat_id)
+    await forward_onboarding_to_account_application(event.message, event.chat_id)
 
 
 async def get_ssc_reviewer():
@@ -544,6 +605,13 @@ async def on_ssc_send_approval(event):
                     # 都命中同一条消息而重复排队。
                     asyncio.create_task(
                         forward_onboarding_to_pre_onboarding_queue(sent, item["destination"])
+                    )
+                    # 同一个道理：账号申请这条也可能走场景三自动发送，也可能
+                    # SSC手动直接发到联合管理群，两条路径都要能触发，靠
+                    # forward_onboarding_to_account_application自带的去重
+                    # 记录防止重复生成草稿。
+                    asyncio.create_task(
+                        forward_onboarding_to_account_application(sent, item["destination"])
                     )
                 if item.get("delete_draft_after_send"):
                     try:
