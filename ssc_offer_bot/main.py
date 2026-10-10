@@ -2768,6 +2768,23 @@ async def generate_onboarding_confirmation(candidate_name, rec, text, *, sender_
     state.update(candidate_name, pending_recruiter_dm=None)
 
 
+async def resolve_trigger_bot_id():
+    """转正/周年提醒只认星辰小助手发的消息：按用户名解析出数字ID。
+    已在 .env 里固定了ID则不动；解析失败保持0（忽略群内所有消息）并告警。"""
+    if config.REGULARIZATION_TRIGGER_BOT_ID:
+        config.ANNIVERSARY_TRIGGER_BOT_ID = config.REGULARIZATION_TRIGGER_BOT_ID
+        return
+    username = config.REGULARIZATION_TRIGGER_BOT_USERNAME
+    try:
+        entity = await client.get_entity(username)
+    except Exception:
+        log.exception("[启动] 无法解析触发机器人 @%s，转正/周年提醒将被忽略", username)
+        return
+    config.REGULARIZATION_TRIGGER_BOT_ID = entity.id
+    config.ANNIVERSARY_TRIGGER_BOT_ID = entity.id
+    log.info("[启动] 触发机器人 @%s -> %s", username, entity.id)
+
+
 async def main():
     await client.start()
     me = await client.get_me()
@@ -2777,6 +2794,7 @@ async def main():
             f"登录账号ID {me.id} 与配置SSC账号ID {config.EXPECTED_SSC_USER_ID} 不一致"
         )
     await get_ssc_reviewer()
+    await resolve_trigger_bot_id()
     attendance = None
     if os.environ.get('ATTENDANCE_AUTO_REPLY_ENABLED', '1' if config.ENVIRONMENT == 'test' else '0') == '1':
         attendance = AttendanceReplies(client, StateStore(config.DB_PATH + '.attendance.json'))

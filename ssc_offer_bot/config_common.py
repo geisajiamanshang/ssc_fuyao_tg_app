@@ -61,8 +61,15 @@ DAILY_REPORT_RECIPIENT = os.environ.get("DAILY_REPORT_RECIPIENT", "oiyr90557")
 DAILY_REPORT_TIMEZONE = os.environ.get("DAILY_REPORT_TIMEZONE", "Asia/Shanghai")
 DAILY_REPORT_POLL_SECONDS = int(os.environ.get("DAILY_REPORT_POLL_SECONDS", "300"))
 
+# 星辰小组工作对接群里的"星辰小助手"机器人。数字ID不依赖记忆，启动时按用户名
+# 自动解析（见 main.resolve_trigger_bot_id）；如需固定，可在 .env 里直接填
+# REGULARIZATION_TRIGGER_BOT_ID 覆盖。解析失败时保持0，即忽略所有群内消息，
+# 不会误放行别的发送者。
+REGULARIZATION_TRIGGER_BOT_USERNAME = os.environ.get(
+    "REGULARIZATION_TRIGGER_BOT_USERNAME", "checker_xing_bot"
+)
 REGULARIZATION_TRIGGER_BOT_ID = int(
-    os.environ.get("REGULARIZATION_TRIGGER_BOT_ID", "8416618309")
+    os.environ.get("REGULARIZATION_TRIGGER_BOT_ID", "0")
 )
 REGULARIZATION_TRIGGER_KEYWORD = "转正提醒-恒睿-转正倒数4天"
 REGULARIZATION_TODAY_TRIGGER_KEYWORD = "转正提醒-恒睿-今日转正"
@@ -194,7 +201,7 @@ PRODUCTION_CHAT_IDS = frozenset({
     -1003559652510,  # HRBP沟通群
     -1003865890708,  # 联合管理群
     -1004380831613,  # 招聘群
-    -1004492520637,  # 云昭触发群
+    -1004472320269,  # 星辰小组工作对接群（触发群）
     -1003553653887,  # ACFAN全员群
     -1003663263859,  # 运营一部全员群
     -1003950803307,  # 运营二部全员群
