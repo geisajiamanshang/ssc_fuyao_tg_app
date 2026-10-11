@@ -179,8 +179,34 @@ class AllStaffNoticeTests(IsolatedAsyncioTestCase):
         broadcast_destinations = [d for d, _t, _f in env['_sent'] if d != 9]
         self.assertEqual(broadcast_destinations, [-101, -102, -103, -104, -105])
         self.assertTrue(all(t == '【今日培训温馨提醒】已修正内容' for _d, t, _f in env['_sent'][1:]))
-        # 第5次发送成功后才删除收藏夹草稿。
-        self.assertEqual(env['_deleted'], [draft_id])
+        # 第5次发送成功后才删除：收藏夹草稿 + 5条审批码(7)消息。
+        self.assertEqual(env['_deleted'], [draft_id, 2000, 2001, 2002, 2003, 2004])
+        record = next(r for r in env['outbox'].all().values() if r['draft_id'] == draft_id)
+        self.assertEqual(record['status'], 'sent')
+
+    async def test_approval_message_delete_failure_does_not_break_completion(self):
+        poster = NS(id=9, raw_text='【今日培训温馨提醒】原始内容', media=NS(photo=True))
+        env = build_env(history_messages=[poster])
+        await env['on_all_staff_notice_trigger'](trigger_event())
+        draft_id = next(
+            r['draft_id'] for r in env['outbox'].all().values()
+            if r['approval_code'] == '测试7'
+        )
+        env['_client'].get_messages = AsyncMock(
+            return_value=NS(id=draft_id, raw_text='内容', media=NS(photo=True))
+        )
+        calls = []
+
+        async def flaky_delete(chat_id, ids):
+            calls.append(list(ids))
+            if len(calls) == 2:
+                raise RuntimeError('network')
+
+        env['_client'].delete_messages = flaky_delete
+        for i in range(5):
+            await env['on_ssc_send_approval'](approve_event('测试7', 4000 + i))
+
+        self.assertEqual(calls, [[draft_id], [4000, 4001, 4002, 4003, 4004]])
         record = next(r for r in env['outbox'].all().values() if r['draft_id'] == draft_id)
         self.assertEqual(record['status'], 'sent')
 

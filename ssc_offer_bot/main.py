@@ -583,16 +583,21 @@ async def on_ssc_send_approval(event):
             if item["kind"] == "all_staff_broadcast":
                 remaining = list(item.get("remaining_destinations") or item["destinations"])
                 sent_so_far = list(item.get("sent_destinations") or [])
+                approval_msg_ids = list(item.get("approval_msg_ids") or [])
                 destination = remaining.pop(0)
                 sent = await client.send_message(destination, text,
                                                  file=media, parse_mode=None)
                 sent_so_far.append(destination)
+                # 记下每一次发送的审批码消息(7)，全部发完后连同草稿一起删掉。
+                if event.message.id not in approval_msg_ids:
+                    approval_msg_ids.append(event.message.id)
                 if remaining:
                     # 还有全员群没发完：保持pending，让SSC能对同一草稿再次发送
                     # 同一个审批码，转发到下一个群；不提前更新候选人状态机。
                     outbox.update(key, status="pending",
                                  remaining_destinations=remaining,
-                                 sent_destinations=sent_so_far)
+                                 sent_destinations=sent_so_far,
+                                 approval_msg_ids=approval_msg_ids)
                     log.info(
                         "[SSC审批] 已广播至全员群=%s msg_id=%s；还剩%s个群，"
                         "SSC可继续发送%s",
@@ -601,7 +606,8 @@ async def on_ssc_send_approval(event):
                 else:
                     state.update(item["candidate"], **updates)
                     outbox.update(key, status="sent",
-                                 remaining_destinations=[], sent_destinations=sent_so_far)
+                                 remaining_destinations=[], sent_destinations=sent_so_far,
+                                 approval_msg_ids=approval_msg_ids)
                     log.info(
                         "[SSC审批] 已广播完全部全员群，最后一个=%s msg_id=%s",
                         destination, sent.id,
@@ -611,6 +617,11 @@ async def on_ssc_send_approval(event):
                             await client.delete_messages(reviewer.id, [item["draft_id"]])
                         except Exception:
                             log.exception("[SSC审批] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
+                    # 5个群都发完后，SSC在收藏夹里发的每一条审批码(7)也一并删除。
+                    try:
+                        await client.delete_messages(reviewer.id, approval_msg_ids)
+                    except Exception:
+                        log.exception("[SSC审批] 全员群已发完但删除审批码消息失败，msg_ids=%s", approval_msg_ids)
             elif item["kind"] == "offboarding_salary":
                 # 薪水结算信息不进任何群，直接私发给员工本人的工作TG。
                 recipient = await client.get_entity(item["destination"])
