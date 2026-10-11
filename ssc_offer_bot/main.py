@@ -132,6 +132,7 @@ from templates import (
     build_onboarding_confirm_message,
 )
 from daily_reports import DailyReportSender
+from roster_code import RosterCodeRepository
 from regularization import (
     RegularizationDriveRepository,
     build_regularization_messages,
@@ -240,6 +241,12 @@ offboarding_events = StateStore(config.OFFBOARDING_STATE_PATH)
 offboarding_lock = asyncio.Lock()
 offboarding_drive = OffboardingDriveRepository(config.OFFBOARDING_OUTPUT_FOLDER_ID)
 offboarding_process_drive = OffboardingApprovalFormRepository(config.OFFBOARDING_PROCESS_FOLDER_ID)
+roster_code_events = StateStore(config.ROSTER_CODE_STATE_PATH)
+roster_code_lock = asyncio.Lock()
+roster_code_repo = RosterCodeRepository(
+    config.ROSTER_CODE_SPREADSHEET_ID, config.ROSTER_CODE_SHEET_GID,
+    config.ROSTER_CODE_NAME_COLUMN, config.ROSTER_CODE_CODE_COLUMN,
+)
 daily_sync_lock = asyncio.Lock()
 self_eval_lock = asyncio.Lock()
 account_application_lock = asyncio.Lock()
@@ -362,6 +369,59 @@ async def forward_onboarding_to_account_application(message, chat_id):
         log.exception("[入职账号申请] %s 处理失败", key)
 
 
+async def record_candidate_code_to_roster(message, chat_id):
+    """联合管理群里出现SSC发布的【入职信息确认】后，把候选人编码填进花名册
+    （机器人）D列。写不进去（姓名没匹配上、该格已有别的编码、表格不可写等）
+    都发提示到收藏夹由SSC人工处理，绝不新增行或覆盖已有内容。"""
+    if not config.ROSTER_CODE_ENABLED or chat_id != config.GROUP_LEADERSHIP:
+        return
+    text = message.raw_text or ""
+    if "入职信息确认" not in "".join(text.split()):
+        return
+    me = await client.get_me()
+    if message.sender_id != me.id:
+        return
+    key = f"{chat_id}:{message.id}"
+    async with roster_code_lock:
+        if roster_code_events.get(key):
+            return
+        roster_code_events.set(key, {"status": "writing"})
+    fields = parse_kv_fields(text)
+    name = (get_field(fields, "候选人姓名") or "").strip()
+    code = (get_field(fields, "候选人编码") or "").strip()
+    if not name or not code:
+        roster_code_events.set(key, {"status": "skipped", "reason": "缺少姓名或编码"})
+        await client.send_message(
+            (await get_ssc_reviewer()).id,
+            f"入职信息确认里缺少{'候选人姓名' if not name else '候选人编码'}，"
+            f"未回填花名册（机器人）D列（{name or code or message.id}）。",
+            parse_mode=None,
+        )
+        return
+    problems = {
+        "name_not_found": "花名册（机器人）C列里没找到该姓名，未写入，请确认该员工是否已在花名册里",
+        "ambiguous": "花名册（机器人）里有多行同名且D列都已有内容，无法确定写哪一行，未写入",
+        "conflict": "花名册（机器人）该员工D列已有不同的编码，为避免覆盖未写入，请人工核对",
+    }
+    try:
+        status, row_number = await asyncio.to_thread(roster_code_repo.write_code, name, code)
+        roster_code_events.set(key, {"status": status, "name": name, "code": code, "row": row_number})
+        log.info("[花名册编码] %s %s -> %s 行=%s", name, code, status, row_number)
+        if status in problems:
+            await client.send_message(
+                (await get_ssc_reviewer()).id,
+                f"{name}（{code}）：{problems[status]}。", parse_mode=None,
+            )
+    except Exception as exc:
+        roster_code_events.set(key, {"status": "failed", "name": name, "reason": str(exc)[:300]})
+        log.exception("[花名册编码] %s 回填失败", name)
+        await client.send_message(
+            (await get_ssc_reviewer()).id,
+            f"{name}（{code}）候选人编码回填花名册（机器人）失败：{str(exc)[:200]}",
+            parse_mode=None,
+        )
+
+
 @client.on(events.NewMessage(chats=config.GROUP_LEADERSHIP, outgoing=True))
 async def on_ssc_onboarding_published(event):
     if event.chat_id in config.EXCLUDED_CHAT_IDS:
@@ -369,6 +429,7 @@ async def on_ssc_onboarding_published(event):
     await forward_onboarding_to_hrgs(event.message, event.chat_id)
     await forward_onboarding_to_pre_onboarding_queue(event.message, event.chat_id)
     await forward_onboarding_to_account_application(event.message, event.chat_id)
+    await record_candidate_code_to_roster(event.message, event.chat_id)
 
 
 async def get_ssc_reviewer():

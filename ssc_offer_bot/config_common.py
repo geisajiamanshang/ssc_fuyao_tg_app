@@ -196,6 +196,17 @@ ACCOUNT_APPLICATION_CUTOVER_DATE = "2026-10-01"
 # 配置，先不打扰。
 ACCOUNT_APPLICATION_MIN_DAYS_SINCE_EFFECTIVE = 6
 
+# 联合管理群出现【入职信息确认】后，把"候选人编码"写进花名册（机器人）表
+# D列（按"候选人姓名"在C列找已有行，只填这一格）。表格：
+# https://docs.google.com/spreadsheets/d/1cCAsC1qHTSJ32uDJlDFKTQ4mPkNbwV-x
+# 服务账号需要对这张表有"编辑者"权限，且启用了 Google Sheets API。
+ROSTER_CODE_SPREADSHEET_ID = os.environ.get(
+    "ROSTER_CODE_SPREADSHEET_ID", "1cCAsC1qHTSJ32uDJlDFKTQ4mPkNbwV-x"
+)
+ROSTER_CODE_SHEET_GID = int(os.environ.get("ROSTER_CODE_SHEET_GID", "1173062379"))
+ROSTER_CODE_NAME_COLUMN = "C"
+ROSTER_CODE_CODE_COLUMN = "D"
+
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({
     -1003559652510,  # HRBP沟通群

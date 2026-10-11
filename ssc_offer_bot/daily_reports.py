@@ -37,17 +37,20 @@ def is_due(now):
     return scheduled is not None and now.time().replace(tzinfo=None) >= scheduled
 
 
-def _drive_session():
-    """优先用服务账号；公开文件夹也可使用 Google Drive API key。"""
+def _drive_session(scopes=None, need_write=False):
+    """优先用服务账号；公开文件夹也可使用 Google Drive API key（只读）。
+    需要写入表格时传 scopes 并设 need_write=True，此时不接受API key。"""
     credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
     if credentials_path:
         from google.auth.transport.requests import AuthorizedSession
         from google.oauth2 import service_account
 
         credentials = service_account.Credentials.from_service_account_file(
-            credentials_path, scopes=[DRIVE_SCOPE]
+            credentials_path, scopes=list(scopes or [DRIVE_SCOPE])
         )
         return AuthorizedSession(credentials), {}
+    if need_write:
+        raise RuntimeError("写入Google表格需要服务账号凭证（GOOGLE_APPLICATION_CREDENTIALS）")
 
     api_key = os.environ.get("GOOGLE_DRIVE_API_KEY", "").strip()
     if api_key:

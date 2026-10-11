@@ -40,6 +40,8 @@ def build_env(**overrides):
     for node in functions:
         node.decorator_list = []
     env = dict(
+        # 花名册编码回填有自己的测试(test_roster_code)，这里不关心。
+        record_candidate_code_to_roster=AsyncMock(),
         select_pending=select_pending, parse_kv_fields=parse_kv_fields, get_field=get_field,
         get_leader_tags=lambda *a, **kw: ['leader'],
         forward_onboarding_to_hrgs=AsyncMock(),
