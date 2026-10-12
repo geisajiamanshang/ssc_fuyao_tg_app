@@ -2544,19 +2544,30 @@ async def handle_final_approved(candidate_name: str, rec: dict):
     相关消息时，优先选发送人不是BP本人的那条。"""
     resume_candidates = []
     fallback_candidates = []
+    seen_msg_ids = set()
     candidate_code = get_field(rec.get("raw_fields", {}), "候选人编码")
     hrbp_username = (rec.get("hrbp_username") or "").strip().lstrip("@").casefold()
     # 搜索索引未命中时分页遍历历史，避免格式差异和旧简历超出固定条数上限。
+    # 真实事故：候选人"元宝"明明有带编码的正式简历，Telegram按编码/姓名的
+    # search=搜索却没把它搜出来（CJK文本搜索本就不保证完整命中），只搜到了
+    # 一条提到姓名但没有编码的面试反馈消息；旧逻辑只要某一轮搜到了"退而求
+    # 其次"的候选消息就直接break，根本没走到search=None这个不依赖Telegram
+    # 搜索、100%遍历全部历史的兜底，于是正式简历被错过、退化成了退而求其次
+    # 的那条消息。现在只有真的搜到了带编码的正式简历才提前结束；只搜到
+    # "退而求其次"候选时继续试下一个搜索词，直到兜底的search=None也跑完。
     searches = list(dict.fromkeys(value for value in (candidate_code, candidate_name) if value)) + [None]
     for search in searches:
         kwargs = {"search": search, "limit": None} if search else {"limit": None}
         async for m in client.iter_messages(config.GROUP_RECRUIT, **kwargs):
+            if m.id in seen_msg_ids:
+                continue
+            seen_msg_ids.add(m.id)
             text = m.raw_text or ""
             if matches_recruit_candidate(text, candidate_name, candidate_code):
                 resume_candidates.append(m)
             elif matches_recruit_candidate_by_name(text, candidate_name):
                 fallback_candidates.append(m)
-        if resume_candidates or fallback_candidates:
+        if resume_candidates:
             break
 
     resume_msg = await _pick_preferred_recruit_message(resume_candidates, hrbp_username)

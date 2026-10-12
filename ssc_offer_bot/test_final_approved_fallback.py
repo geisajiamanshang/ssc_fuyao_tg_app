@@ -163,6 +163,44 @@ class FinalApprovedFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs['reply_to'], 97)
         ns['client'].send_message.assert_not_awaited()
 
+    async def test_resume_found_only_by_unbounded_fallback_pass_is_not_shadowed(self):
+        # 真实事故：候选人"元宝"确实有带编码的正式简历，但Telegram按编码/
+        # 姓名做search=搜索时都没把它搜出来（CJK文本search=本就不保证完整
+        # 命中）——只搜到一条提到姓名、不带编码的面试反馈消息。旧逻辑只要
+        # 某一轮搜到"退而求其次"的候选消息就直接break，根本没走到
+        # search=None这个不依赖Telegram搜索、100%遍历全部历史的兜底，正式
+        # 简历因此被错过，退化成了拿面试反馈当简历用。
+        resume = NS(id=70, raw_text='候选人编码：WTQA00123\n候选人姓名：元宝',
+                    get_sender=AsyncMock(return_value=NS(id=8, username='recruiter')))
+        feedback_only_name = NS(
+            id=2835, raw_text='面试反馈报告\n候选人姓名：元宝\n测评人员面试结果：通过',
+            get_sender=AsyncMock(return_value=NS(id=9, username='hr_weien')),
+        )
+
+        def iter_messages(entity, search=None, limit=None):
+            async def history():
+                if search is None:
+                    # 唯一保证完整命中的一轮：两条消息都在历史里。
+                    for m in (feedback_only_name, resume):
+                        yield m
+                elif search == 'WTQA00123':
+                    return
+                    yield  # pragma: no cover - 让函数体仍是生成器
+                elif search == '元宝':
+                    # Telegram按姓名search=只搜到了反馈消息，没搜到简历。
+                    yield feedback_only_name
+            return history()
+
+        ns['client'].iter_messages = iter_messages
+        rec = {'raw_fields': {'候选人编码': 'WTQA00123'}}
+        await ns['handle_final_approved']('元宝', rec)
+
+        call = ns['queue_group_message'].call_args
+        self.assertIsNotNone(call)
+        self.assertEqual(call.kwargs['reply_to'], 70, '应该最终用上search=None兜底搜到的正式简历，而不是停在退而求其次的反馈消息上')
+        self.assertEqual(call.kwargs['updates']['recruiter_username'], 'recruiter')
+        ns['client'].send_message.assert_not_awaited()
+
     async def test_no_match_at_all_still_reports_for_manual_handling(self):
         unrelated = NS(id=90, raw_text='候选人姓名：小明\n入职部门：技术中心',
                        get_sender=AsyncMock(return_value=NS(id=1, username='other')))
