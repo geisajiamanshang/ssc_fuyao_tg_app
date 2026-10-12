@@ -313,8 +313,20 @@ async def forward_onboarding_to_pre_onboarding_queue(message, chat_id):
             return
         pre_onboarding_queue_forwards.set(key, {"status": "queuing"})
     candidate = get_field(parse_kv_fields(text), "候选人姓名") or str(message.id)
-    await queue_pre_onboarding_registration(candidate, text)
+    await queue_pre_onboarding_registration(candidate, pre_onboarding_registration_text(text))
     pre_onboarding_queue_forwards.update(key, status="queued")
+
+
+def pre_onboarding_registration_text(text):
+    """预入职登记群只需要编制/薪资/招聘/入职这几块结构化字段用来登记系统，
+    不需要#面试评价正文和结尾@领导"请知悉"这行——那是写给联合管理工作群
+    领导看的，转发到登记群里反而是噪音，格式也不对。真实反馈：转发过去的
+    内容把整段面试评价和@名单都带过去了。面试评价/主要面试官之后、结尾的
+    @领导请知悉这行都一并去掉；两者都找不到时原样返回，不强行删内容。"""
+    insertion = re.search(r"(?m)^[ \t]*#?[ \t]*(?:面试评价|主要面试官)[ \t]*[:：]", text)
+    if insertion:
+        return text[:insertion.start()].rstrip()
+    return re.sub(r"(?m)\n[ \t]*(?:@\S+[ \t]*)+请知悉[ \t]*$", "", text).rstrip()
 
 
 async def forward_onboarding_to_account_application(message, chat_id):

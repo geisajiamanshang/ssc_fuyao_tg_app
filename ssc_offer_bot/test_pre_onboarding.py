@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import logging
+import re
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest import IsolatedAsyncioTestCase
@@ -32,18 +33,19 @@ class MemoryStore:
 def build_env(**overrides):
     """只抽取待测函数本身，其余依赖通过命名空间注入，不连真实Telegram。"""
     source = ast.parse(Path(__file__).with_name('main.py').read_text())
-    functions = [n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
-                 and n.name in {'queue_group_message', 'on_ssc_send_approval',
-                                'queue_pre_onboarding_registration',
-                                'forward_onboarding_to_pre_onboarding_queue',
-                                'on_ssc_onboarding_published'}]
+    names = {'queue_group_message', 'on_ssc_send_approval',
+             'queue_pre_onboarding_registration',
+             'forward_onboarding_to_pre_onboarding_queue',
+             'on_ssc_onboarding_published', 'pre_onboarding_registration_text'}
+    functions = [n for n in source.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
     for node in functions:
         node.decorator_list = []
     env = dict(
         # 花名册编码回填有自己的测试(test_roster_code)，这里不关心。
         record_candidate_code_to_roster=AsyncMock(),
         select_pending=select_pending, parse_kv_fields=parse_kv_fields, get_field=get_field,
-        get_leader_tags=lambda *a, **kw: ['leader'],
+        get_leader_tags=lambda *a, **kw: ['leader'], re=re,
         forward_onboarding_to_hrgs=AsyncMock(),
         # 账号申请(入职触发)那条路径有自己独立的测试文件
         # (test_account_application_handler.py)，这里只关心预入职登记
@@ -67,6 +69,30 @@ ONBOARDING_TEXT = (
     '入职部门：ACFan特战队-品牌组\n'
     '入职日期：2026-10-08（四）\n'
     '候选人联系方式：TG-@LemonQ69'
+)
+
+# 真实事故：完整入职确认（带#面试评价正文和结尾@领导请知悉）原样转发到了
+# 预入职登记群，格式不对；登记群只需要编制/薪资/招聘/入职这几块结构化字段。
+ONBOARDING_TEXT_WITH_INTERVIEW_NOTES = (
+    '运营中心【入职信息确认】\n'
+    '候选人编码：WTQA00123\n'
+    '候选人姓名：元宝\n'
+    '性别：男\n'
+    '入职编制组织：运营中心\n'
+    '入职部门：运营一部产品运营组\n'
+    '3️⃣招聘信息\n'
+    '招聘渠道：万天\n'
+    '简历来源：乔安\n'
+    '招聘通道：个人资源\n'
+    '4️⃣入职信息\n'
+    '入职日期：10月13\n'
+    '候选人联系方式：@Yuanbao18888\n\n'
+    '#面试评价：\n'
+    '主要面试官：\n'
+    '1. 成人行业经验：具有成人平台内容运营经验\n\n'
+    '主要面试官：张雷/大路飞\n'
+    '次要面试官：冯晚柠\n\n'
+    '@DaBai10010 @chuqianyiding @zlei1216 @wean4790 请知悉'
 )
 
 
@@ -190,6 +216,35 @@ class PreOnboardingTests(IsolatedAsyncioTestCase):
         self.assertEqual(pre_items[0]['approval_code'], '测试11')
         draft_text = next(text for dest, text in self.sent if dest == 9)
         self.assertIn('候选人姓名：Nancy', draft_text)
+
+    async def test_interview_notes_and_leader_mentions_stripped_before_registration(self):
+        # 真实反馈：转发到预入职登记群的草稿带着整段#面试评价正文和结尾
+        # @领导"请知悉"，格式不对——登记群只需要结构化字段用来登记系统。
+        self.state.data['元宝'] = {'stage': 'done'}
+        event = NS(
+            chat_id=-1,
+            message=NS(id=777, raw_text=ONBOARDING_TEXT_WITH_INTERVIEW_NOTES, sender_id=self.me.id),
+        )
+        await self.env['on_ssc_onboarding_published'](event)
+        await _drain_background_tasks()
+        draft_text = next(text for dest, text in self.sent if dest == 9)
+        self.assertIn('候选人联系方式：@Yuanbao18888', draft_text)
+        self.assertNotIn('面试评价', draft_text)
+        self.assertNotIn('主要面试官', draft_text)
+        self.assertNotIn('请知悉', draft_text)
+        self.assertNotIn('@DaBai10010', draft_text)
+
+    def test_pre_onboarding_registration_text_keeps_structural_fields_only(self):
+        trimmed = self.env['pre_onboarding_registration_text'](ONBOARDING_TEXT_WITH_INTERVIEW_NOTES)
+        self.assertTrue(trimmed.endswith('候选人联系方式：@Yuanbao18888'))
+        self.assertNotIn('面试评价', trimmed)
+        self.assertNotIn('请知悉', trimmed)
+
+    def test_pre_onboarding_registration_text_without_interview_notes_unchanged(self):
+        # 没有面试评价/@请知悉这类尾巴时，原样返回，不强行删别的内容。
+        self.assertEqual(
+            self.env['pre_onboarding_registration_text'](ONBOARDING_TEXT), ONBOARDING_TEXT,
+        )
 
     async def test_same_message_is_not_queued_twice(self):
         # 场景三自动发送的消息，client.send_message返回的sent对象和
