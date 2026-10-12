@@ -61,6 +61,12 @@ GROUP_OFFBOARDING_BUSINESS_SYNC = (
     int(os.environ["GROUP_OFFBOARDING_BUSINESS_SYNC"])
     if os.environ.get("GROUP_OFFBOARDING_BUSINESS_SYNC") else None
 )
+# 场景十三测试：次日培训信息同步目标群占位ID（该功能只在生产环境启用，
+# 测试环境配置仅用于单测/占位，不会真的发送）。
+GROUP_REMOTE_TRAINING = (
+    int(os.environ["GROUP_REMOTE_TRAINING"])
+    if os.environ.get("GROUP_REMOTE_TRAINING") else -5298765432
+)
 # 离职助手/输出 文件夹的测试环境ID待补充；留空时离职审批功能整体自动跳过。
 OFFBOARDING_OUTPUT_FOLDER_ID = os.environ.get(
     "TEST_OFFBOARDING_OUTPUT_FOLDER_ID", OFFBOARDING_OUTPUT_FOLDER_ID

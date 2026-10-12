@@ -66,6 +66,10 @@ GROUP_ACCOUNT_REQUEST_WORK = int(os.environ.get(
 GROUP_OFFBOARDING_BUSINESS_SYNC = int(os.environ.get(
     "GROUP_OFFBOARDING_BUSINESS_SYNC", "-5164874973"
 )) or None
+# 场景十三：次日培训信息同步目标群。
+GROUP_REMOTE_TRAINING = int(os.environ.get(
+    "GROUP_REMOTE_TRAINING", "-1003855659853"
+)) or None
 
 # ========== 本地状态文件 ==========
 DB_PATH = "offer_state.json"

@@ -207,6 +207,23 @@ ROSTER_CODE_SHEET_GID = int(os.environ.get("ROSTER_CODE_SHEET_GID", "1173062379"
 ROSTER_CODE_NAME_COLUMN = "C"
 ROSTER_CODE_CODE_COLUMN = "D"
 
+# SSC在自己的收藏夹发带"培训"关键词的消息，触发按花名册（机器人）AR列
+# 日期筛出"明天"要培训的人，生成【次日培训信息同步】草稿发到收藏夹，经
+# 审批码14（测试14）放行到共享服务中心-远程培训沟通群。跟ROSTER_CODE用的
+# 是同一张"花名册（机器人）"表格（表头只占1行，数据从第2行开始），列位置
+# SSC本人核对过：简历名=E，编制组织=M，部门=P，岗位=U，培训日期=AR；
+# "服务单位"这张表没有单独列，固定写"恒睿"，复用DAILY_SYNC_COMPANY_LABEL；
+# 分组顺序复用DAILY_SYNC_CENTER_ORDER。
+# https://docs.google.com/spreadsheets/d/1NuEckgwIEjzegpktBx4O6UxjFXl32LruM1j9JsYVOGw/edit?gid=1173062379
+TRAINING_SYNC_TRIGGER_KEYWORD = "培训"
+TRAINING_SYNC_ROSTER_SPREADSHEET_ID = os.environ.get(
+    "TRAINING_SYNC_ROSTER_SPREADSHEET_ID",
+    "1NuEckgwIEjzegpktBx4O6UxjFXl32LruM1j9JsYVOGw",
+)
+TRAINING_SYNC_ROSTER_SHEET_GID = int(os.environ.get(
+    "TRAINING_SYNC_ROSTER_SHEET_GID", "1173062379"
+))
+
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({
     -1003559652510,  # HRBP沟通群
@@ -220,6 +237,7 @@ PRODUCTION_CHAT_IDS = frozenset({
     -1003946619557,  # 技术/效能部全员群
     -1004334431069,  # 工作帐号需求群-SSC3组
     -5164874973,  # 北斗离职人员-同步商务中心群
+    -1003855659853,  # 共享服务中心-远程培训沟通群
 })
 
 # 生产环境启动时用于屏蔽这些测试群消息，避免账号同时留在两边时误处理。

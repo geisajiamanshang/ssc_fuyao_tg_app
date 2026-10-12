@@ -106,12 +106,20 @@ SSC Offer 审批流转自动化 主程序。
           -> 去掉草稿结尾"@ling2089 请核对/@xxx 请知悉"这两行通知，发到
              收藏夹，经审批码13（测试13）放行到恒睿公司-联合管理工作群
 
+  场景十三：SSC在自己的收藏夹发带"培训"关键词的消息
+          -> 按花名册（机器人）AR列日期筛出"明天"要培训的人（AR列本身
+             存的就是这个人要参加培训那一天的日期，直接当"入职时间"原样
+             展示），按编制组织(M列)分组生成【次日培训信息同步】草稿
+          -> 发到收藏夹，经审批码14（测试14）放行到共享服务中心-远程
+             培训沟通群；只在生产环境启用（原因同"员工自评"：触发关键词
+             不按环境区分前缀，测试、生产用同一个账号，避免两边都响应）
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92/测试111/测试13”，
-     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92/111/13”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92/测试111/测试13/测试14”，
+     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92/111/13/14”。
 """
 
 import asyncio
@@ -121,7 +129,7 @@ import logging
 import random
 import unicodedata
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -202,6 +210,13 @@ from self_eval import (
     format_self_eval_preview,
     parse_self_eval_response,
 )
+from training_sync import (
+    TRAINING_SYNC_HEADER,
+    TrainingSyncRosterRepository,
+    build_training_sync_report,
+    parse_training_roster_rows,
+    select_people_for_date,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -267,6 +282,11 @@ account_application_sheets = AccountApplicationSheetsRepository(
 )
 wallet_sync_events = StateStore(config.DB_PATH + ".wallet_sync.json")
 wallet_sync_lock = asyncio.Lock()
+training_sync_events = StateStore(config.TRAINING_SYNC_STATE_PATH)
+training_sync_lock = asyncio.Lock()
+training_sync_roster_repo = TrainingSyncRosterRepository(
+    config.TRAINING_SYNC_ROSTER_SPREADSHEET_ID, config.TRAINING_SYNC_ROSTER_SHEET_GID,
+)
 
 
 async def forward_onboarding_to_hrgs(message, chat_id):
@@ -2998,6 +3018,85 @@ async def on_wallet_sync_confirmation(event):
     except Exception:
         log.exception("[场景12] 处理msg_id=%s失败", event.message.id)
         wallet_sync_events.update(event_key, status="failed")
+
+
+# ==================== 场景十三：次日培训信息同步 ====================
+@client.on(events.NewMessage())
+async def on_ssc_training_sync_trigger(event):
+    """SSC在自己的收藏夹发带"培训"关键词的消息（TRAINING_SYNC_TRIGGER_
+    KEYWORD），触发：按花名册（机器人）AR列日期筛出"明天"要培训的人，按
+    编制组织分组生成【次日培训信息同步】草稿发到收藏夹，经审批码14（测试
+    14）放行到共享服务中心-远程培训沟通群。这是发起一次新的生成，不是
+    释放某条已排队的草稿，所以不走APPROVAL_CODES/select_pending那一套，
+    用独立的监听器识别。
+
+    草稿本身的标题【次日培训信息同步】也带"培训"两个字，草稿发到收藏夹
+    后会被这个监听器自己收到——所以先排除消息本身已经是这份报告（带
+    TRAINING_SYNC_HEADER）的情况，否则会被自己的草稿当成新一轮触发，
+    无限重复生成下去；同理，下面几条诊断/失败提示也特意不出现"培训"这
+    两个字连在一起，避免同样的自触发循环（没匹配到人、功能未启用这几种
+    情况都可能被频繁触发，更要小心）。
+    """
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    if TRAINING_SYNC_HEADER in text:
+        return
+    if config.TRAINING_SYNC_TRIGGER_KEYWORD not in text:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.TRAINING_SYNC_ENABLED:
+        await client.send_message(
+            reviewer.id,
+            "该流程未启用：花名册（机器人）表格ID、目标群（GROUP_REMOTE_"
+            "TRAINING）需要都配置好，且只在生产环境生效。",
+            parse_mode=None,
+        )
+        return
+    key = f"{event.chat_id}:{event.message.id}"
+    async with training_sync_lock:
+        if training_sync_events.get(key):
+            return
+        training_sync_events.set(key, {"status": "processing"})
+    try:
+        tomorrow = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date() + timedelta(days=1)
+        rows = await asyncio.to_thread(training_sync_roster_repo.load_rows)
+        people = parse_training_roster_rows(rows)
+        selected = select_people_for_date(people, tomorrow)
+        if not selected:
+            training_sync_events.update(key, status="no_match")
+            await client.send_message(
+                reviewer.id,
+                f"次日（{tomorrow.isoformat()}）没有在花名册（机器人）AR列查到要上课的人。",
+                parse_mode=None,
+            )
+            return
+        report_text = build_training_sync_report(
+            selected, config.DAILY_SYNC_CENTER_ORDER, config.DAILY_SYNC_COMPANY_LABEL,
+            tomorrow.isoformat(),
+        )
+        await queue_group_message(
+            config.GROUP_REMOTE_TRAINING, report_text,
+            candidate=f"training_sync:{key}",
+            expected_stage="waiting_training_sync_approval",
+            updates={"stage": "training_sync_sent"},
+            kind="training_sync", approval_code=config.TRAINING_SYNC_APPROVAL_CODE,
+        )
+        training_sync_events.update(key, status="queued", count=len(selected))
+        log.info(
+            "[场景13] %s（%s人）已生成草稿，等待SSC发送%s放行到共享服务中心-远程培训沟通群",
+            tomorrow.isoformat(), len(selected), config.TRAINING_SYNC_APPROVAL_CODE,
+        )
+    except Exception as exc:
+        training_sync_events.update(key, status="failed")
+        log.exception("[场景13] 处理msg_id=%s失败", event.message.id)
+        await client.send_message(
+            reviewer.id,
+            "该流程生成失败，请查看机器人日志。错误：" + str(exc)[:200],
+            parse_mode=None,
+        )
 
 
 async def main():

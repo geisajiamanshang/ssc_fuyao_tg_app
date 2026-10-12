@@ -71,6 +71,10 @@ ACCOUNT_APPLICATION_APPROVAL_CODE = "测试111" if ENVIRONMENT == "test" else "1
 # （HR人工发的，钱包地址已经填好，这条只是核对确认），去掉草稿结尾的
 # 通知行后发到收藏夹，经这个审批码放行到恒睿公司-联合管理工作群。
 WALLET_SYNC_APPROVAL_CODE = "测试13" if ENVIRONMENT == "test" else "13"
+# SSC收藏夹发带"培训"关键词的消息触发按花名册（机器人）AR列日期筛出
+# "明天"要培训的人，生成的【次日培训信息同步】草稿经这个审批码放行到
+# 共享服务中心-远程培训沟通群。
+TRAINING_SYNC_APPROVAL_CODE = "测试14" if ENVIRONMENT == "test" else "14"
 APPROVAL_CODES = frozenset({
     OFFER_APPROVAL_CODE,
     REGULARIZATION_APPROVAL_CODE,
@@ -91,6 +95,7 @@ APPROVAL_CODES = frozenset({
     DAILY_SYNC_SUMMARY_APPROVAL_CODE,
     DAILY_SYNC_DETAIL_APPROVAL_CODE,
     WALLET_SYNC_APPROVAL_CODE,
+    TRAINING_SYNC_APPROVAL_CODE,
 })
 DAILY_REPORT_ENABLED = ENVIRONMENT == "prod"
 HRGS_FORWARD_ENABLED = ENVIRONMENT == "prod"
@@ -126,6 +131,14 @@ OFFBOARDING_ENABLED = bool(OFFBOARDING_OUTPUT_FOLDER_ID)
 # 同一张真实花名册，测试环境不应往真实表格里写数据。
 ROSTER_CODE_ENABLED = ENVIRONMENT == "prod" and bool(ROSTER_CODE_SPREADSHEET_ID)
 ROSTER_CODE_STATE_PATH = DB_PATH + ".roster_code.json"
+# 次日培训信息同步只在生产环境启用：触发关键词"培训"跟员工自评一样不按
+# 环境区分前缀，测试、生产两个进程用的是同一个Telegram账号，SSC在收藏夹
+# 发一次两边都会收到，所以只允许生产环境响应。花名册（机器人）表格ID、
+# 共享服务中心-远程培训沟通群两者都配置好之前自动跳过，不报错也不误发。
+TRAINING_SYNC_ENABLED = ENVIRONMENT == "prod" and bool(
+    GROUP_REMOTE_TRAINING and TRAINING_SYNC_ROSTER_SPREADSHEET_ID
+)
+TRAINING_SYNC_STATE_PATH = DB_PATH + ".training_sync.json"
 # 复用 GROUP_REGULARIZATION_SYNC 作为数据来源和无详情版目标群，该群ID配置好
 # 之前自动跳过，不报错。
 DAILY_SYNC_ENABLED = bool(GROUP_REGULARIZATION_SYNC)
@@ -151,6 +164,7 @@ ALLOWED_DESTINATION_IDS = frozenset({
     *([GROUP_ACCOUNT_REQUEST_FOREIGN] if GROUP_ACCOUNT_REQUEST_FOREIGN else []),
     *([GROUP_ACCOUNT_REQUEST_WORK] if GROUP_ACCOUNT_REQUEST_WORK else []),
     *([GROUP_OFFBOARDING_BUSINESS_SYNC] if GROUP_OFFBOARDING_BUSINESS_SYNC else []),
+    *([GROUP_REMOTE_TRAINING] if GROUP_REMOTE_TRAINING else []),
 })
 # 生产进程即便账号仍留在测试群里，也一律不处理测试群消息。
 EXCLUDED_CHAT_IDS = TEST_CHAT_IDS if ENVIRONMENT == "prod" else frozenset()
