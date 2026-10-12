@@ -97,12 +97,21 @@ SSC Offer 审批流转自动化 主程序。
           -> SSC发送111统一放行本轮全部草稿：逐条间隔随机5-10秒转发到
              工作帐号需求群-SSC3组，每条发送成功后立即删除对应收藏夹草稿
 
+  场景十二：恒睿SSC/HRBP-沟通群（与场景一HRBP发Offer消息同一个群）里，
+          @ling2089 发出带"钱包收款地址"关键词的消息（通常是转发/回复员工
+          本人发来的收款地址，核对跟HR之前发的草稿一致，不是提供新地址）
+          -> 按消息里的"花名"，到同一个群更早的消息中找HR人工发的
+             【新入职员工钱包地址信息同步】草稿（钱包地址在草稿里本来就
+             已经填好）
+          -> 去掉草稿结尾"@ling2089 请核对/@xxx 请知悉"这两行通知，发到
+             收藏夹，经审批码13（测试13）放行到恒睿公司-联合管理工作群
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92/测试111”，
-     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92/111”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92/测试111/测试13”，
+     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92/111/13”。
 """
 
 import asyncio
@@ -256,6 +265,8 @@ account_application_sheets = AccountApplicationSheetsRepository(
     config.ACCOUNT_APPLICATION_ROSTER_BOT_SPREADSHEET_ID,
     config.ACCOUNT_APPLICATION_ROSTER_BOT_SHEET_GID,
 )
+wallet_sync_events = StateStore(config.DB_PATH + ".wallet_sync.json")
+wallet_sync_lock = asyncio.Lock()
 
 
 async def forward_onboarding_to_hrgs(message, chat_id):
@@ -2878,6 +2889,115 @@ async def resolve_trigger_bot_id():
     config.REGULARIZATION_TRIGGER_BOT_ID = entity.id
     config.ANNIVERSARY_TRIGGER_BOT_ID = entity.id
     log.info("[启动] 触发机器人 @%s -> %s", username, entity.id)
+
+
+# ==================== 场景十二：恒睿SSC/HRBP-沟通群 钱包地址信息同步 ====================
+WALLET_SYNC_HEADER = "【新入职员工钱包地址信息同步】"
+
+
+def matches_wallet_sync_draft(text, candidate_name):
+    """按"花名"匹配"恒睿SSC/HRBP-沟通群"里更早发出的【新入职员工钱包地址
+    信息同步】草稿消息——草稿由HR人工发出，钱包地址在草稿里本来就已经
+    填好，@ling2089后续转发/回复员工本人的确认消息只是核对，不是提供
+    新地址。要求消息带着草稿固定的方括号标题，避免误把其它凑巧提到同一个
+    花名的消息（比如那条确认消息本身，它的"花名"字段也一样）当成草稿；
+    草稿没有候选人编码可比，只按"花名"精确匹配。
+    """
+    if WALLET_SYNC_HEADER not in text:
+        return False
+    fields = parse_kv_fields(text)
+    name = get_field(fields, "花名")
+    return bool(name) and _normalized_name(name) == _normalized_name(candidate_name)
+
+
+def strip_wallet_sync_notice_lines(text):
+    """去掉草稿结尾连续的@提及通知行（和它们前面的空行）。真实场景里是
+    "@ling2089 请和员工再次核对钱包地址，谢谢。\n@wean4790 请知悉"两行，
+    两行各自的收尾措辞不一样（"谢谢。"/"请知悉"），跟预入职登记那边固定
+    收尾"请知悉"的pre_onboarding_registration_text()不是同一种情况，所以
+    单独写一个更通用的版本：从文本末尾往前，只要这一行是空行或者以@提及
+    开头，就去掉，直到遇到第一条不是这样的行为止；找不到这类结尾时原样
+    返回，不强行删内容。
+    """
+    lines = text.splitlines()
+    while lines and (not lines[-1].strip() or re.match(r"^[ \t]*@\S+", lines[-1])):
+        lines.pop()
+    return "\n".join(lines).rstrip()
+
+
+@client.on(events.NewMessage(chats=config.GROUP_HRBP))
+async def on_wallet_sync_confirmation(event):
+    """场景十二：恒睿SSC/HRBP-沟通群（跟场景一HRBP发Offer消息是同一个群，
+    GROUP_HRBP）里，@ling2089核对完员工本人的钱包收款地址后，转发/回复
+    一条带"钱包收款地址"关键词的确认消息——按这条消息里的"花名"，到同一个
+    群更早的消息里找HR人工发的【新入职员工钱包地址信息同步】草稿，去掉
+    草稿结尾"@ling2089 请核对/@xxx 请知悉"这两行通知，发到SSC收藏夹，经
+    审批码WALLET_SYNC_APPROVAL_CODE（测试13/13）放行到恒睿公司-联合管理
+    工作群——复用queue_group_message统一的收藏夹审批放行机制，不单独写
+    转发代码。
+    """
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = event.raw_text or ""
+    compact = "".join(text.split())
+    if "钱包收款地址" not in compact:
+        return
+    trigger_sender = (config.WALLET_SYNC_TRIGGER_SENDER or "").strip().lstrip("@").casefold()
+    if not trigger_sender:
+        return
+    sender = await event.get_sender()
+    sender_username = (getattr(sender, "username", "") or "").strip().lstrip("@").casefold()
+    if sender_username != trigger_sender:
+        return
+    event_key = f"{event.chat_id}:{event.message.id}"
+    async with wallet_sync_lock:
+        if wallet_sync_events.get(event_key):
+            return
+        wallet_sync_events.set(event_key, {"status": "processing"})
+    try:
+        fields = parse_kv_fields(text)
+        candidate_name = get_field(fields, "花名")
+        if not candidate_name:
+            log.warning("[场景12] msg_id=%s 未能从钱包地址核对确认消息中识别出花名", event.message.id)
+            wallet_sync_events.update(event_key, status="no_name_found")
+            return
+        draft_message = None
+        async for m in client.iter_messages(config.GROUP_HRBP, limit=None):
+            if m.id >= event.message.id:
+                continue
+            if matches_wallet_sync_draft(m.raw_text or "", candidate_name):
+                draft_message = m
+                break
+        if not draft_message:
+            log.warning(
+                "[场景12] 候选人「%s」已收到@%s的钱包地址核对确认，但未在沟通群历史消息中找到"
+                "对应的【新入职员工钱包地址信息同步】草稿", candidate_name, config.WALLET_SYNC_TRIGGER_SENDER,
+            )
+            reviewer = await get_ssc_reviewer()
+            await client.send_message(
+                reviewer.id,
+                candidate_name + f"-收到@{config.WALLET_SYNC_TRIGGER_SENDER}的钱包地址核对确认，"
+                "但在恒睿SSC/HRBP-沟通群历史消息中未找到对应的「新入职员工钱包地址信息同步」草稿，"
+                "请人工核实。", parse_mode=None,
+            )
+            wallet_sync_events.update(event_key, status="no_draft_found")
+            return
+        draft_text = strip_wallet_sync_notice_lines(draft_message.raw_text or "")
+        await queue_group_message(
+            config.GROUP_LEADERSHIP, draft_text,
+            candidate=f"wallet_sync:{candidate_name}:{draft_message.id}",
+            expected_stage="waiting_wallet_sync_approval",
+            updates={"stage": "wallet_sync_sent"},
+            kind="message", approval_code=config.WALLET_SYNC_APPROVAL_CODE,
+        )
+        wallet_sync_events.update(event_key, status="queued", draft_msg_id=draft_message.id)
+        log.info(
+            "[场景12] %s 钱包地址核对确认已收到，草稿(msg_id=%s)已发送SSC收藏夹，等待发送%s放行",
+            candidate_name, draft_message.id, config.WALLET_SYNC_APPROVAL_CODE,
+        )
+    except Exception:
+        log.exception("[场景12] 处理msg_id=%s失败", event.message.id)
+        wallet_sync_events.update(event_key, status="failed")
 
 
 async def main():

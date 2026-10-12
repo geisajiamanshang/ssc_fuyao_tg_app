@@ -44,6 +44,9 @@ GROUP_SSC3_INTERNAL_CHAT = int(os.environ.get(
 LEADER_FIRST = "DaBai10010"        # 一级审批：白一舟，收到"好的"作为一级通过标志
 LEADER_SECOND_TECH = "hk88mc996"   # 技术中心专属二级审批人
 LEADER_FINAL = "chuqianyiding"     # 终审人（所有部门最终都要走到这一步）
+# 场景十二：恒睿SSC/HRBP-沟通群（即GROUP_HRBP）里，核对员工本人钱包地址后
+# 转发/回复确认消息的固定账号。
+WALLET_SYNC_TRIGGER_SENDER = "ling2089"
 
 ANNIVERSARY_GROUP_RULES = [
     {"name": "恒睿公司-ACFAN特战队-全员群", "keywords": ["ACFAN特战队", "ACFAN", "AIGC原创部", "AIGC"], "chat_id": -1003553653887},

@@ -38,6 +38,9 @@ GROUP_SSC3_INTERNAL_CHAT = (
 LEADER_FIRST = "haok001"
 LEADER_SECOND_TECH = "haok001"
 LEADER_FINAL = "Zoey95274"
+# 场景十二测试：默认用SSC本人账号，方便自己在测试群里发消息触发联调；
+# 需要换成别的测试账号时改这里或用环境变量覆盖。
+WALLET_SYNC_TRIGGER_SENDER = os.environ.get("WALLET_SYNC_TRIGGER_SENDER", "Zoey95274")
 
 ANNIVERSARY_GROUP_RULES = [
     {"name": "测试-ACFAN", "keywords": ["ACFAN特战队", "ACFAN", "AIGC原创部", "AIGC"], "chat_id": -5375721803},

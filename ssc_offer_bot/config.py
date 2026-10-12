@@ -66,6 +66,11 @@ DAILY_SYNC_DETAIL_APPROVAL_CODE = "测试92" if ENVIRONMENT == "test" else "92"
 # 草稿——这一点也和APPROVAL_CODES那一套"每次审批最多消费一条"不同，所以
 # 同样不放进去，由独立监听器批量处理。
 ACCOUNT_APPLICATION_APPROVAL_CODE = "测试111" if ENVIRONMENT == "test" else "111"
+# 恒睿SSC/HRBP-沟通群里，@ling2089核对完员工本人钱包地址、转发/回复确认
+# 消息后，按花名找到同一个群更早的【新入职员工钱包地址信息同步】草稿
+# （HR人工发的，钱包地址已经填好，这条只是核对确认），去掉草稿结尾的
+# 通知行后发到收藏夹，经这个审批码放行到恒睿公司-联合管理工作群。
+WALLET_SYNC_APPROVAL_CODE = "测试13" if ENVIRONMENT == "test" else "13"
 APPROVAL_CODES = frozenset({
     OFFER_APPROVAL_CODE,
     REGULARIZATION_APPROVAL_CODE,
@@ -85,6 +90,7 @@ APPROVAL_CODES = frozenset({
     OFFBOARDING_ACCOUNT_RECLAIM_APPROVAL_CODE,
     DAILY_SYNC_SUMMARY_APPROVAL_CODE,
     DAILY_SYNC_DETAIL_APPROVAL_CODE,
+    WALLET_SYNC_APPROVAL_CODE,
 })
 DAILY_REPORT_ENABLED = ENVIRONMENT == "prod"
 HRGS_FORWARD_ENABLED = ENVIRONMENT == "prod"
