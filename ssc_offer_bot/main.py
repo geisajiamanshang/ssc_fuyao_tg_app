@@ -299,7 +299,7 @@ training_sync_events = StateStore(config.TRAINING_SYNC_STATE_PATH)
 training_sync_lock = asyncio.Lock()
 agreement_events = StateStore(config.ONBOARDING_AGREEMENT_STATE_PATH)
 agreement_lock = asyncio.Lock()
-agreement_drive = OnboardingAgreementDriveRepository(config.ONBOARDING_TRAINING_OUTPUT_FOLDER_ID)
+agreement_drive = OnboardingAgreementDriveRepository(config.ONBOARDING_AGREEMENT_OUTPUT_FOLDER_ID)
 training_sync_roster_repo = TrainingSyncRosterRepository(
     config.TRAINING_SYNC_ROSTER_SPREADSHEET_ID, config.TRAINING_SYNC_ROSTER_SHEET_GID,
 )

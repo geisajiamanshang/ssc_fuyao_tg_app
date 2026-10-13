@@ -146,7 +146,7 @@ TRAINING_SYNC_ENABLED = ENVIRONMENT == "prod" and bool(
 TRAINING_SYNC_STATE_PATH = DB_PATH + ".training_sync.json"
 # 入职协议触发词不按环境区分前缀，测试、生产共用同一个Telegram账号，且这个
 # 功能会私发真人，所以只在生产环境启用。
-ONBOARDING_AGREEMENT_ENABLED = ENVIRONMENT == "prod" and bool(ONBOARDING_TRAINING_OUTPUT_FOLDER_ID)
+ONBOARDING_AGREEMENT_ENABLED = ENVIRONMENT == "prod" and bool(ONBOARDING_AGREEMENT_OUTPUT_FOLDER_ID)
 ONBOARDING_AGREEMENT_STATE_PATH = DB_PATH + ".onboarding_agreement.json"
 # 复用 GROUP_REGULARIZATION_SYNC 作为数据来源和无详情版目标群，该群ID配置好
 # 之前自动跳过，不报错。
