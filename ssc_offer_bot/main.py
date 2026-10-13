@@ -221,6 +221,7 @@ from onboarding_agreement import (
     OnboardingAgreementDriveRepository,
     build_agreement_message,
     build_agreement_recipients,
+    strip_trigger_keyword,
 )
 from training_sync import (
     TRAINING_SYNC_HEADER,
@@ -3134,11 +3135,16 @@ async def on_ssc_onboarding_agreement_trigger(event):
     reviewer = await get_ssc_reviewer()
     if not event.is_private or event.chat_id != reviewer.id:
         return
-    if not config.ONBOARDING_AGREEMENT_ENABLED:
+
+    async def notify(message):
         await client.send_message(
-            reviewer.id, "该流程未启用：入职助手/输出文件夹ID需要配置好，且只在生产环境生效。",
+            reviewer.id,
+            strip_trigger_keyword(message, config.ONBOARDING_AGREEMENT_TRIGGER_KEYWORD),
             parse_mode=None,
         )
+
+    if not config.ONBOARDING_AGREEMENT_ENABLED:
+        await notify("该流程未启用：入职助手/输出文件夹ID需要配置好，且只在生产环境生效。")
         return
     key = f"{event.chat_id}:{event.message.id}"
     async with agreement_lock:
@@ -3147,11 +3153,14 @@ async def on_ssc_onboarding_agreement_trigger(event):
         agreement_events.set(key, {"status": "processing"})
     try:
         today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date().isoformat()
-        file_texts = await asyncio.to_thread(agreement_drive.find_daily_files, today)
+        file_texts, seen_names = await asyncio.to_thread(agreement_drive.find_daily_files, today)
         if not file_texts:
-            agreement_events.update(key, status="no_file")
-            await client.send_message(
-                reviewer.id, f"入职助手/输出文件夹里没有找到{today}的入职信息文件。", parse_mode=None,
+            agreement_events.update(key, status="no_file", seen=len(seen_names))
+            shown = "、".join(seen_names[:10]) or "无"
+            await notify(
+                f"入职助手/输出文件夹里没有找到{today}的入职信息文件。机器人在该文件夹里"
+                f"实际看到{len(seen_names)}个文件：{shown}"
+                + ("（看到0个通常是该文件夹没有分享给机器人的Google服务账号）" if not seen_names else "")
             )
             return
         recipients = build_agreement_recipients(file_texts)
@@ -3193,13 +3202,11 @@ async def on_ssc_onboarding_agreement_trigger(event):
         if not queued and not problems:
             summary.append("今天的人之前都已经发送过，没有新增。")
         agreement_events.update(key, status="queued", queued=len(queued), problems=len(problems))
-        await client.send_message(reviewer.id, "\n".join(summary), parse_mode=None)
+        await notify("\n".join(summary))
     except Exception as exc:
         agreement_events.update(key, status="failed")
         log.exception("[场景14] 处理msg_id=%s失败", event.message.id)
-        await client.send_message(
-            reviewer.id, "该流程生成失败，请查看机器人日志。错误：" + str(exc)[:200], parse_mode=None,
-        )
+        await notify("该流程生成失败，请查看机器人日志。错误：" + str(exc)[:200])
 
 
 @client.on(events.NewMessage())

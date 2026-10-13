@@ -5,6 +5,8 @@
 
 import ast
 import asyncio
+import io
+import zipfile
 import random
 import unittest
 from datetime import datetime
@@ -15,8 +17,8 @@ from zoneinfo import ZoneInfo
 
 from onboarding_agreement import (
     AGREEMENT_LINK_MESSAGE, build_agreement_message, build_agreement_recipients,
-    extract_agreement_link, extract_contact_tg, matches_daily_file_name,
-    split_person_records,
+    docx_to_text, extract_agreement_link, extract_contact_tg, matches_daily_file_name,
+    split_person_records, strip_trigger_keyword,
 )
 
 LINK_A = "https://docs.google.com/document/d/AAA/edit"
@@ -85,6 +87,45 @@ class ParsingTests(unittest.TestCase):
         self.assertNotIn("入职协议", AGREEMENT_LINK_MESSAGE)
 
 
+def _make_docx():
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    body = (
+        f'<w:document xmlns:w="{w}" xmlns:r="{r}"><w:body>'
+        '<w:p><w:r><w:t>【入职信息同步】</w:t></w:r></w:p>'
+        '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>花名</w:t></w:r></w:p></w:tc>'
+        '<w:tc><w:p><w:r><w:t>毛小婕</w:t></w:r></w:p></w:tc></w:tr>'
+        '<w:tr><w:tc><w:p><w:r><w:t>工作TG</w:t></w:r></w:p></w:tc>'
+        '<w:tc><w:p><w:r><w:t>@maoxiaojie01</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+        '<w:p><w:r><w:t>转正审批表：</w:t></w:r>'
+        '<w:hyperlink r:id="rId9"><w:r><w:t>点击打开</w:t></w:r></w:hyperlink></w:p>'
+        '</w:body></w:document>'
+    )
+    rels = (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f'<Relationship Id="rId9" Target="{LINK_A}" TargetMode="External"/></Relationships>'
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("word/document.xml", body)
+        zf.writestr("word/_rels/document.xml.rels", rels)
+    return buf.getvalue()
+
+
+class DocxTests(unittest.TestCase):
+    def test_docx_table_rows_and_hyperlink_target_are_extracted(self):
+        text = docx_to_text(_make_docx())
+        self.assertIn("花名：毛小婕", text)
+        self.assertEqual(extract_contact_tg(text), ("@maoxiaojie01", "工作TG"))
+        # 显示文字是"点击打开"，真实地址在超链接关系里，必须能取到。
+        self.assertEqual(extract_agreement_link(text), LINK_A)
+
+    def test_strip_trigger_keyword(self):
+        out = strip_trigger_keyword("远程员工入职协议书.docx", "入职协议")
+        self.assertNotIn("入职协议", out)
+        self.assertIn("入职", out)
+
+
 # ---------- 监听器（AST提取main.py里的函数） ----------
 tree = ast.parse(Path(__file__).with_name("main.py").read_text())
 names = {"on_ssc_onboarding_agreement_trigger", "on_ssc_onboarding_agreement_release"}
@@ -100,6 +141,7 @@ ns = dict(
     config=config, asyncio=asyncio, random=random, datetime=datetime, ZoneInfo=ZoneInfo,
     build_agreement_message=build_agreement_message,
     build_agreement_recipients=build_agreement_recipients,
+    strip_trigger_keyword=strip_trigger_keyword,
 )
 exec(compile(ast.Module(body=funcs, type_ignores=[]), "<agreement>", "exec"), ns)
 
@@ -144,7 +186,7 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             delete_messages=AsyncMock(),
         )
         ns["client"] = self.client
-        ns["agreement_drive"] = NS(find_daily_files=Mock(return_value=[MULTI_SECTION]))
+        ns["agreement_drive"] = NS(find_daily_files=Mock(return_value=([MULTI_SECTION], ["a.docx"])))
         sleeps = []
         ns["asyncio"] = NS(to_thread=asyncio.to_thread, sleep=AsyncMock(side_effect=lambda s: sleeps.append(s)))
         self.sleeps = sleeps
@@ -168,9 +210,9 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("郑元宝 → @zhengyuanbao（私人TG）", summary)
 
     async def test_missing_link_or_tg_not_drafted_but_reported(self):
-        ns["agreement_drive"].find_daily_files.return_value = [
+        ns["agreement_drive"].find_daily_files.return_value = ([
             f"花名：甲\n工作TG：@jiajia1\n花名：乙\n转正审批表：{LINK_A}"
-        ]
+        ], [])
         await ns["on_ssc_onboarding_agreement_trigger"](self._event())
         self.assertEqual(ns["outbox"].all(), {})
         summary = self._sent_texts()[-1]
@@ -185,12 +227,25 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             config.ONBOARDING_AGREEMENT_ENABLED = scenario != "disabled"
             find = ns["agreement_drive"].find_daily_files
             find.side_effect = RuntimeError("boom") if scenario == "fail" else None
-            find.return_value = [] if scenario == "nofile" else (
-                ["花名：甲"] if scenario == "problems" else [MULTI_SECTION])
+            find.return_value = ([], ["远程员工入职协议书.docx"]) if scenario == "nofile" else (
+                (["花名：甲"], []) if scenario == "problems" else ([MULTI_SECTION], []))
             await ns["on_ssc_onboarding_agreement_trigger"](self._event())
             for text in self._sent_texts():
                 self.assertNotIn("入职协议", text, scenario)
         config.ONBOARDING_AGREEMENT_ENABLED = True
+
+    async def test_no_file_notice_lists_what_the_bot_actually_saw(self):
+        ns["agreement_drive"].find_daily_files.return_value = ([], ["旧文件.txt", "远程员工入职协议书.docx"])
+        await ns["on_ssc_onboarding_agreement_trigger"](self._event())
+        notice = self._sent_texts()[-1]
+        self.assertIn("实际看到2个文件", notice)
+        self.assertIn("旧文件.txt", notice)
+        self.assertNotIn("入职协议", notice)
+
+    async def test_no_file_and_zero_seen_hints_at_sharing(self):
+        ns["agreement_drive"].find_daily_files.return_value = ([], [])
+        await ns["on_ssc_onboarding_agreement_trigger"](self._event())
+        self.assertIn("没有分享给机器人的Google服务账号", self._sent_texts()[-1])
 
     async def test_message_without_keyword_or_wrong_chat_ignored(self):
         await ns["on_ssc_onboarding_agreement_trigger"](self._event(text="随便聊聊"))

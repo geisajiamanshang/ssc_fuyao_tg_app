@@ -13,8 +13,11 @@
 纯逻辑单独放在这里，不涉及Telegram调用，方便独立测试。
 """
 
+import io
 import re
 import unicodedata
+import zipfile
+from xml.etree import ElementTree as ET
 
 from daily_reports import DRIVE_FILES_URL, _drive_session
 from onboarding_training import OnboardingTrainingDriveRepository, _SECTION_RE
@@ -30,6 +33,85 @@ _WORK_TG_KEYS = ("工作TG", "工作tg", "工作Telegram")
 _PERSONAL_TG_KEYS = ("私人TG", "私人联系方式", "个人TG", "候选人联系方式", "联系方式", "TG", "Telegram")
 _GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 _FOLDER_MIME = "application/vnd.google-apps.folder"
+
+
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_REL = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_FIELD_URL_RE = re.compile(r'HYPERLINK\s+"([^"]+)"', re.I)
+
+
+def strip_trigger_keyword(text, keyword):
+    """收藏夹里机器人自己发的提示也会被触发监听器收到：提示里如果带了触发关键词
+    （比如把文件名原样列出来，而文件名里恰好有这个词），就会自己触发自己。
+    把关键词拆开一个点，保证发出去的提示一定不含完整关键词。"""
+    if not keyword:
+        return text
+    return (text or "").replace(keyword, keyword[:2] + "·" + keyword[2:])
+
+
+def docx_to_text(raw):
+    """不依赖第三方库，从.docx里取出按段落排版的纯文本：表格里两列的行转成
+    "字段：值"，超链接的真实地址（显示文字往往不是网址）追加在显示文字后面，
+    保证后面的链接提取能拿到真正的URL。"""
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        document = ET.fromstring(zf.read("word/document.xml"))
+        rels = {}
+        if "word/_rels/document.xml.rels" in zf.namelist():
+            for rel in ET.fromstring(zf.read("word/_rels/document.xml.rels")):
+                rels[rel.get("Id")] = rel.get("Target", "")
+
+    def para_text(p):
+        out = []
+
+        def walk(node, link=None):
+            for child in node:
+                tag = child.tag
+                if tag == _W + "t":
+                    out.append(child.text or "")
+                elif tag == _W + "tab":
+                    out.append("\t")
+                elif tag == _W + "br":
+                    out.append("\n")
+                elif tag == _W + "instrText":
+                    match = _FIELD_URL_RE.search(child.text or "")
+                    if match:
+                        out.append(" " + match.group(1) + " ")
+                elif tag == _W + "hyperlink":
+                    target = rels.get(child.get(_R + "id"), "")
+                    walk(child)
+                    if target.startswith("http"):
+                        out.append(" " + target + " ")
+                else:
+                    walk(child)
+
+        walk(p)
+        return "".join(out).strip()
+
+    lines = []
+
+    def walk_block(node):
+        for child in node:
+            if child.tag == _W + "p":
+                lines.append(para_text(child))
+            elif child.tag == _W + "tbl":
+                for row in child.iter(_W + "tr"):
+                    cells = []
+                    for cell in row.findall(_W + "tc"):
+                        cells.append(" ".join(
+                            t for t in (para_text(p) for p in cell.iter(_W + "p")) if t
+                        ))
+                    cells = [c for c in cells if c]
+                    if len(cells) == 2:
+                        lines.append(f"{cells[0]}：{cells[1]}")
+                    else:
+                        lines.extend(cells)
+            else:
+                walk_block(child)
+
+    walk_block(document)
+    return "\n".join(lines)
 
 
 def _compact(value):
@@ -131,10 +213,12 @@ class OnboardingAgreementDriveRepository:
 
     @staticmethod
     def _download_text(session, auth_params, drive_file):
-        if drive_file.get("mimeType") == _GOOGLE_DOC_MIME:
+        mime = drive_file.get("mimeType")
+        if mime == _GOOGLE_DOC_MIME:
+            # 导出成docx再解析：text/plain导出会丢掉超链接的真实地址。
             response = session.get(
                 f"{DRIVE_FILES_URL}/{drive_file['id']}/export",
-                params={**auth_params, "mimeType": "text/plain"}, timeout=120,
+                params={**auth_params, "mimeType": _DOCX_MIME}, timeout=120,
             )
         else:
             response = session.get(
@@ -143,15 +227,19 @@ class OnboardingAgreementDriveRepository:
             )
         response.raise_for_status()
         raw = response.content
+        if raw[:2] == b"PK":
+            return docx_to_text(raw)
         encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
         try:
             text = raw.decode(encoding)
         except UnicodeDecodeError as exc:
-            raise ValueError("入职信息文件编码无法识别，请将文件保存为UTF-8文本后重试") from exc
+            raise ValueError("入职信息文件编码无法识别，请将文件保存为UTF-8文本或Word/Google文档后重试") from exc
         return text.replace("\r\n", "\n").replace("\r", "\n")
 
     def find_daily_files(self, date_str):
-        """返回当日入职信息文件的文本列表（文件名以日期开头且含"入职信息"）。"""
+        """返回 (当日入职信息文件的文本列表, 机器人在文件夹里实际看到的全部文件名)；
+        后者用来在没找到时告诉SSC机器人到底看到了什么（看到0个通常说明文件夹
+        没有分享给机器人的Google服务账号）。"""
         session, auth_params = _drive_session()
         list_children = OnboardingTrainingDriveRepository._list_children
         top_level = list_children(session, auth_params, self.output_folder_id)
@@ -166,4 +254,5 @@ class OnboardingAgreementDriveRepository:
                 if i.get("mimeType") != _FOLDER_MIME
             )
         matched = [i for i in items if matches_daily_file_name(i.get("name", ""), date_str)]
-        return [self._download_text(session, auth_params, i) for i in matched]
+        texts = [self._download_text(session, auth_params, i) for i in matched]
+        return texts, [i.get("name", "") for i in items]
