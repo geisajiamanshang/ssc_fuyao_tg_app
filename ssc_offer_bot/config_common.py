@@ -229,10 +229,10 @@ TRAINING_SYNC_ROSTER_SHEET_GID = int(os.environ.get(
 # 2026-10-13_入职信息xxx），把当日入职每个人的转正审批表链接私发给这个人的
 # 工作TG（没有就用私人TG）；每人一条草稿进收藏夹，审批码15统一放行。
 ONBOARDING_AGREEMENT_TRIGGER_KEYWORD = "入职协议"
-# 入职助手/输出：https://drive.google.com/drive/u/1/folders/1JDJHf_ywjP4VsSnuyAGfdnYepNPW2xKx
+# 入职助手/输出：https://drive.google.com/drive/u/1/folders/1-oU9osg6xskVunLzZf9NvRGPzr8H5hmR
 # 这个文件夹要分享给机器人的Google服务账号，否则机器人看不到里面的文件。
 ONBOARDING_AGREEMENT_OUTPUT_FOLDER_ID = os.environ.get(
-    "ONBOARDING_AGREEMENT_OUTPUT_FOLDER_ID", "1JDJHf_ywjP4VsSnuyAGfdnYepNPW2xKx"
+    "ONBOARDING_AGREEMENT_OUTPUT_FOLDER_ID", "1-oU9osg6xskVunLzZf9NvRGPzr8H5hmR"
 )
 
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
