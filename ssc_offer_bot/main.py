@@ -116,8 +116,8 @@ SSC Offer 审批流转自动化 主程序。
 
   场景十四：SSC在自己的收藏夹收到带"入职协议"关键词的消息（任何人发的/转发的）
           -> 到Drive入职助手/输出文件夹找当日入职信息文件（2026-10-13_入职信息xxx），
-             取当日入职每个人的转正审批表链接，工作TG（没有就用私人TG）
-          -> 每人一条"这是你的转正审批表链接，请签字哦"草稿发到收藏夹，经审批码
+             再按「花名_入职协议_日期」找到每个人的入职协议Drive链接，发到工作TG（没有就用私人TG）
+          -> 每人一条"这是你的入职协议链接，请签字哦"草稿发到收藏夹，经审批码
              15（测试15）一次性放行：逐个私发，间隔随机5-10秒，发送成功即删草稿；
              只在生产环境启用（会私发真人，且关键词不分环境）
 
@@ -218,7 +218,9 @@ from self_eval import (
     parse_self_eval_response,
 )
 from onboarding_agreement import (
+    AGREEMENT_LINK_MESSAGE,
     OnboardingAgreementDriveRepository,
+    OnboardingAgreementFilesRepository,
     build_agreement_message,
     build_agreement_recipients,
     strip_trigger_keyword,
@@ -300,6 +302,9 @@ training_sync_lock = asyncio.Lock()
 agreement_events = StateStore(config.ONBOARDING_AGREEMENT_STATE_PATH)
 agreement_lock = asyncio.Lock()
 agreement_drive = OnboardingAgreementDriveRepository(config.ONBOARDING_AGREEMENT_OUTPUT_FOLDER_ID)
+agreement_files = OnboardingAgreementFilesRepository([
+    config.ONBOARDING_AGREEMENT_OUTPUT_FOLDER_ID, config.ONBOARDING_AGREEMENT_UPLOAD_FOLDER_ID,
+])
 training_sync_roster_repo = TrainingSyncRosterRepository(
     config.TRAINING_SYNC_ROSTER_SPREADSHEET_ID, config.TRAINING_SYNC_ROSTER_SHEET_GID,
 )
@@ -3115,23 +3120,25 @@ async def on_ssc_training_sync_trigger(event):
         )
 
 
-# ==================== 场景十四：入职协议——转正审批表链接私发 ====================
+# ==================== 场景十四：入职协议——协议链接私发 ====================
 @client.on(events.NewMessage())
 async def on_ssc_onboarding_agreement_trigger(event):
     """SSC收藏夹收到带"入职协议"关键词的消息（任何人发的/转发的都算）：到入职
-    助手/输出文件夹找当日入职信息文件，取当日入职每个人的转正审批表链接，
-    每人一条"这是你的转正审批表链接，请签字哦"草稿进收藏夹，等审批码15统一
+    助手/输出文件夹找当日入职信息文件，再按「花名_入职协议_日期」找每个人的入职
+    协议Drive链接，每人一条"这是你的入职协议链接，请签字哦"草稿进收藏夹，等审批码15统一
     放行后逐个私发给这个人的工作TG（没有就用私人TG）。
 
-    收藏夹里机器人自己发的提示也会被这个监听器收到，所以下面所有提示都
-    刻意不出现"入职协议"这四个字，避免自己触发自己；草稿本身是发给员工的
-    文案，也不含这个关键词。缺链接/缺TG的人不硬发，汇总提示SSC人工处理。
+    收藏夹里机器人自己发的消息也会被这个监听器收到：提示经notify去掉了
+    "入职协议"关键词；草稿是发给员工的文案，必然带这四个字，所以开头单独
+    识别并忽略。缺链接/缺TG的人不硬发，汇总提示SSC人工处理。
     """
     if event.chat_id in config.EXCLUDED_CHAT_IDS:
         return
     text = (event.raw_text or "").strip()
     if config.ONBOARDING_AGREEMENT_TRIGGER_KEYWORD not in text:
         return
+    if AGREEMENT_LINK_MESSAGE in text:
+        return  # 机器人自己放进收藏夹的待私发草稿，不是触发指令
     reviewer = await get_ssc_reviewer()
     if not event.is_private or event.chat_id != reviewer.id:
         return
@@ -3164,10 +3171,20 @@ async def on_ssc_onboarding_agreement_trigger(event):
             )
             return
         recipients = build_agreement_recipients(file_texts)
+        need_link = [p["name"] for p in recipients if not p["link"] and p["tg"]]
+        found_links = (
+            await asyncio.to_thread(agreement_files.find_agreement_links, today, need_link)
+            if need_link else {}
+        )
         queued, problems = [], []
         for person in recipients:
+            person["link"] = person["link"] or found_links.get(person["name"], "")
             if not person["link"]:
-                problems.append(f"{person['name']}：文件里没找到转正审批表链接")
+                problems.append(
+                    f"{person['name']}：没找到{today}的协议文件（文件名需形如 花名_入职协议_日期，"
+                    "放在入职助手/输出或协议上传文件夹，并已分享给机器人）"
+                    if person["tg"] else f"{person['name']}：没有工作TG/私人TG"
+                )
                 continue
             if not person["tg"]:
                 problems.append(f"{person['name']}：没有工作TG/私人TG")
@@ -3193,7 +3210,7 @@ async def on_ssc_onboarding_agreement_trigger(event):
                 })
                 state.update(candidate, stage="waiting_agreement_link_approval")
             queued.append(f"{person['name']} → {person['tg']}（{person['tg_source']}）")
-        summary = [f"当日新员工转正审批表链接：已生成{len(queued)}条待私发草稿，"
+        summary = [f"当日新员工协议链接：已生成{len(queued)}条待私发草稿，"
                    f"确认无误后发送 {config.ONBOARDING_AGREEMENT_APPROVAL_CODE} 放行。"]
         if queued:
             summary.append("收件人：\n" + "\n".join(queued))
@@ -3212,7 +3229,7 @@ async def on_ssc_onboarding_agreement_trigger(event):
 @client.on(events.NewMessage())
 async def on_ssc_onboarding_agreement_release(event):
     """SSC在自己的收藏夹发送ONBOARDING_AGREEMENT_APPROVAL_CODE（15/测试15），
-    一次性放行本轮全部待私发的转正审批表链接草稿：逐个私发，间隔随机5-10秒，
+    一次性放行本轮全部待私发的协议链接草稿：逐个私发，间隔随机5-10秒，
     每条发送成功立即删除对应草稿；发送失败的标failed并告诉SSC是谁，不自动重发
     （避免重复私发）。"""
     if event.chat_id in config.EXCLUDED_CHAT_IDS:
