@@ -80,6 +80,10 @@ TRAINING_SYNC_APPROVAL_CODE = "测试14" if ENVIRONMENT == "test" else "14"
 # 跟111一样一次释放多条，不是"每次审批消费一条"，所以不放进APPROVAL_CODES，
 # 由独立监听器处理。
 ONBOARDING_AGREEMENT_APPROVAL_CODE = "测试15" if ENVIRONMENT == "test" else "15"
+# 审批码151：收藏夹收到后把当日所有入职协议汇总，一条消息私发给领导审批
+# （ONBOARDING_AGREEMENT_LEADER_TG）。这个码本身就是SSC的"发送"指令，不先出草稿；
+# 同样不放进APPROVAL_CODES，由独立监听器处理（跟"15"精确匹配，互不触发）。
+ONBOARDING_AGREEMENT_FORWARD_CODE = "测试151" if ENVIRONMENT == "test" else "151"
 APPROVAL_CODES = frozenset({
     OFFER_APPROVAL_CODE,
     REGULARIZATION_APPROVAL_CODE,

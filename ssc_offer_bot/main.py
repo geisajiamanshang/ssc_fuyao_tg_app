@@ -120,6 +120,9 @@ SSC Offer 审批流转自动化 主程序。
           -> 每人一条"这是你的入职协议，签字哦"+协议Drive链接的草稿发到收藏夹，经审批码
              15（测试15）一次性放行：逐个私发，间隔随机5-10秒，发送成功即删草稿；
              只在生产环境启用（会私发真人，且关键词不分环境）
+          -> 收藏夹收到审批码151（测试151）：把当日所有入职协议的链接汇总成一条
+             "x人入职协议，请萌萌姐审批"消息，直接私发给萌萌姐（@woshidaimeng87）；
+             同一天内容没变的话重复发151不会重复发送
 
 运行前请务必先：
   1. pip install -r requirements.txt
@@ -221,6 +224,7 @@ from onboarding_agreement import (
     AGREEMENT_LINK_MESSAGE,
     OnboardingAgreementRepository,
     build_agreement_message,
+    build_leader_approval_message,
     extract_private_tg,
     strip_trigger_keyword,
 )
@@ -3272,6 +3276,63 @@ async def on_ssc_onboarding_agreement_release(event):
                 )
         if index < len(pending) - 1:
             await asyncio.sleep(random.uniform(5, 10))
+
+
+@client.on(events.NewMessage())
+async def on_ssc_onboarding_agreement_forward(event):
+    """SSC在自己的收藏夹发送ONBOARDING_AGREEMENT_FORWARD_CODE（151/测试151）：
+    收集当日入职的所有入职协议（找法同场景十四），汇总成一条"x人入职协议，请萌萌姐
+    审批"+每个协议一个链接的消息，私发给领导（ONBOARDING_AGREEMENT_LEADER_TG）。
+    151就是SSC的发送指令，所以不再先出草稿；发完把发出的内容回到收藏夹留底。
+    同一天协议链接集合没变时再发151不重复发送，有新增的人才会重新汇总发送。
+    """
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    if (event.raw_text or "").strip() != config.ONBOARDING_AGREEMENT_FORWARD_CODE:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.ONBOARDING_AGREEMENT_ENABLED:
+        return
+
+    async def notify(message):
+        await client.send_message(
+            reviewer.id,
+            strip_trigger_keyword(message, config.ONBOARDING_AGREEMENT_TRIGGER_KEYWORD),
+            parse_mode=None,
+        )
+
+    today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date().isoformat()
+    leader = config.ONBOARDING_AGREEMENT_LEADER_TG
+    async with agreement_lock:
+        try:
+            agreements, diag = await asyncio.to_thread(agreement_repo.find_today_agreements, today)
+            if not agreements:
+                await notify(
+                    f"没有找到{today}入职的协议文件，未发送给{leader}。"
+                    f"月份文件夹：{'、'.join(diag['month_folders']) or '没找到'}，"
+                    f"实际看到{len(diag['files'])}个文件。"
+                )
+                return
+            links = [a["link"] for a in agreements]
+            event_key = f"leader_forward:{today}"
+            if set((agreement_events.get(event_key) or {}).get("links", [])) == set(links):
+                await notify(f"今天这{len(links)}份协议已经发送给{leader}了，没有新增，不重复发送。")
+                return
+            message = build_leader_approval_message(links)
+            recipient = await client.get_entity(leader)
+            async with ssc_send_lock:
+                sent = await client.send_message(recipient, message, parse_mode=None, link_preview=False)
+            agreement_events.set(event_key, {"links": links, "sent_msg_id": sent.id})
+            log.info("[场景14] 已把%s份协议汇总发送给%s msg_id=%s", len(links), leader, sent.id)
+            await notify(
+                f"已发送给{leader}（共{len(links)}人）：\n"
+                + "\n".join(f"{a['name']}：{a['link']}" for a in agreements)
+            )
+        except Exception as exc:
+            log.exception("[场景14] 汇总发送给%s失败", leader)
+            await notify(f"汇总发送给{leader}失败：{str(exc)[:150]}（未发送，可重新发送{config.ONBOARDING_AGREEMENT_FORWARD_CODE}）")
 
 
 async def main():

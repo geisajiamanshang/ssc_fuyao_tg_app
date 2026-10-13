@@ -194,6 +194,12 @@ def build_agreement_message(link):
     return f"{AGREEMENT_LINK_MESSAGE}\n{link}"
 
 
+def build_leader_approval_message(links):
+    """发给领导审批的汇总消息：第一行"x人入职协议，请萌萌姐审批"，下面每个协议一个链接，
+    链接之间空一行。"""
+    return f"{len(links)}人入职协议，请萌萌姐审批\n" + "\n\n".join(links)
+
+
 def collect_folder_files(session, auth_params, folder_id):
     """文件夹顶层的文件，加上最近修改的5个子文件夹里的文件。"""
     list_children = OnboardingTrainingDriveRepository._list_children

@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 import onboarding_agreement
 from onboarding_agreement import (
     AGREEMENT_LINK_MESSAGE, OnboardingAgreementRepository, build_agreement_message,
-    docx_to_text, drive_file_link, extract_private_tg, matches_agreement_file_name,
+    build_leader_approval_message, docx_to_text, drive_file_link, extract_private_tg, matches_agreement_file_name,
     matches_month_folder, person_name_from_file_name, strip_trigger_keyword,
 )
 
@@ -103,6 +103,13 @@ def _make_docx():
     return buf.getvalue()
 
 
+class LeaderMessageTests(unittest.TestCase):
+    def test_format_matches_the_sample(self):
+        self.assertEqual(build_leader_approval_message([LINK_A, LINK_B]),
+                         f"2人入职协议，请萌萌姐审批\n{LINK_A}\n\n{LINK_B}")
+        self.assertTrue(build_leader_approval_message([LINK_A]).startswith("1人入职协议，请萌萌姐审批\n"))
+
+
 class DocxTests(unittest.TestCase):
     def test_docx_table_row_gives_private_tg(self):
         text = docx_to_text(_make_docx())
@@ -181,19 +188,21 @@ class RepositoryTests(unittest.TestCase):
 
 # ---------- 监听器（AST提取main.py里的函数） ----------
 tree = ast.parse(Path(__file__).with_name("main.py").read_text())
-names = {"on_ssc_onboarding_agreement_trigger", "on_ssc_onboarding_agreement_release"}
+names = {"on_ssc_onboarding_agreement_trigger", "on_ssc_onboarding_agreement_release",
+         "on_ssc_onboarding_agreement_forward"}
 funcs = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name in names]
 for n in funcs:
     n.decorator_list = []
 config = NS(
     EXCLUDED_CHAT_IDS=frozenset(), ONBOARDING_AGREEMENT_TRIGGER_KEYWORD="入职协议",
     ONBOARDING_AGREEMENT_ENABLED=True, ONBOARDING_AGREEMENT_APPROVAL_CODE="15",
+    ONBOARDING_AGREEMENT_FORWARD_CODE="151", ONBOARDING_AGREEMENT_LEADER_TG="@woshidaimeng87",
     DAILY_REPORT_TIMEZONE="Asia/Shanghai",
 )
 ns = dict(
     config=config, asyncio=asyncio, random=random, datetime=datetime, ZoneInfo=ZoneInfo,
     build_agreement_message=build_agreement_message,
-    extract_private_tg=extract_private_tg,
+    extract_private_tg=extract_private_tg, build_leader_approval_message=build_leader_approval_message,
     strip_trigger_keyword=strip_trigger_keyword, AGREEMENT_LINK_MESSAGE=AGREEMENT_LINK_MESSAGE,
 )
 exec(compile(ast.Module(body=funcs, type_ignores=[]), "<agreement>", "exec"), ns)
@@ -395,6 +404,72 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
         await ns["on_ssc_onboarding_agreement_release"](self._event(text="14"))
         config.ONBOARDING_AGREEMENT_ENABLED = False
         await ns["on_ssc_onboarding_agreement_release"](self._event(text="15"))
+        self.client.send_message.assert_not_awaited()
+
+
+class ForwardToLeaderTests(HandlerTests):
+    """审批码151：汇总当日全部协议链接，一条消息私发给领导。"""
+
+    def _leader_sends(self):
+        return [c for c in self.client.send_message.call_args_list if hasattr(c.args[0], "entity")]
+
+    async def test_151_sends_one_summary_message_to_leader_and_leaves_a_record(self):
+        await ns["on_ssc_onboarding_agreement_forward"](self._event(text="151"))
+        sends = self._leader_sends()
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0].args[0].entity, "@woshidaimeng87")
+        self.assertEqual(sends[0].args[1], f"2人入职协议，请萌萌姐审批\n{LINK_A}\n\n{LINK_B}")
+        self.assertIs(sends[0].kwargs.get("link_preview"), False)
+        record = self._sent_texts()[-1]
+        self.assertIn("已发送给@woshidaimeng87（共2人）", record)
+        self.assertIn(f"毛小婕：{LINK_A}", record)
+        self.assertNotIn("入职协议", record)       # 收藏夹里的留底不能带触发关键词
+        self.assertEqual(self.find.call_args.args[0], datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat())
+
+    async def test_repeat_151_with_same_agreements_not_resent_but_new_person_is(self):
+        await ns["on_ssc_onboarding_agreement_forward"](self._event(text="151", msg_id=1))
+        await ns["on_ssc_onboarding_agreement_forward"](self._event(text="151", msg_id=2))
+        self.assertEqual(len(self._leader_sends()), 1)
+        self.assertIn("已经发送给@woshidaimeng87了", self._sent_texts()[-1])
+        self.agreements.append({"name": "奕辰", "file_name": "奕辰_入职协议_20261013.docx",
+                                "link": "https://drive.google.com/file/d/CCC/view", "text": "", "error": ""})
+        await ns["on_ssc_onboarding_agreement_forward"](self._event(text="151", msg_id=3))
+        sends = self._leader_sends()
+        self.assertEqual(len(sends), 2)
+        self.assertTrue(sends[1].args[1].startswith("3人入职协议，请萌萌姐审批\n"))
+
+    async def test_no_agreements_today_sends_nothing(self):
+        self.find.return_value = ([], {"root_folders": [], "month_folders": [], "files": []})
+        await ns["on_ssc_onboarding_agreement_forward"](self._event(text="151"))
+        self.assertEqual(self._leader_sends(), [])
+        self.assertIn("没有找到", self._sent_texts()[-1])
+        self.assertNotIn("入职协议", self._sent_texts()[-1])
+
+    async def test_send_failure_is_reported_and_can_be_retried(self):
+        self.client.get_entity.side_effect = ValueError("no such user")
+        await ns["on_ssc_onboarding_agreement_forward"](self._event(text="151", msg_id=1))
+        self.assertEqual(self._leader_sends(), [])
+        self.assertIn("汇总发送给@woshidaimeng87失败", self._sent_texts()[-1])
+        self.client.get_entity.side_effect = lambda u: NS(entity=u)
+        await ns["on_ssc_onboarding_agreement_forward"](self._event(text="151", msg_id=2))
+        self.assertEqual(len(self._leader_sends()), 1)
+
+    async def test_ignored_when_wrong_code_chat_sender_or_disabled(self):
+        for kwargs in ({"text": "15"}, {"text": "1511"}, {"text": "测试151"},
+                       {"text": "151", "chat_id": 5, "is_private": False},
+                       {"text": "151", "sender_id": 7}):
+            await ns["on_ssc_onboarding_agreement_forward"](self._event(**kwargs))
+        config.ONBOARDING_AGREEMENT_ENABLED = False
+        await ns["on_ssc_onboarding_agreement_forward"](self._event(text="151"))
+        config.ONBOARDING_AGREEMENT_ENABLED = True
+        self.client.send_message.assert_not_awaited()
+
+    async def test_codes_15_and_151_do_not_trigger_each_other(self):
+        await ns["on_ssc_onboarding_agreement_trigger"](self._event())        # 先生成待私发草稿
+        self.client.send_message.reset_mock()
+        await ns["on_ssc_onboarding_agreement_release"](self._event(text="151", msg_id=60))
+        self.client.send_message.assert_not_awaited()
+        await ns["on_ssc_onboarding_agreement_forward"](self._event(text="15", msg_id=61))
         self.client.send_message.assert_not_awaited()
 
 

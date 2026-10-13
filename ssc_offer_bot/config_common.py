@@ -235,6 +235,9 @@ ONBOARDING_AGREEMENT_FOLDER_ID = os.environ.get(
     "ONBOARDING_AGREEMENT_FOLDER_ID", "1tmNkfhM35ZbYYXu1UncC7dZCsbx_BUJq"
 )
 
+# 收藏夹发审批码151：把当日所有入职协议的链接汇总成一条消息，私发给萌萌姐审批。
+ONBOARDING_AGREEMENT_LEADER_TG = os.environ.get("ONBOARDING_AGREEMENT_LEADER_TG", "@woshidaimeng87")
+
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({
     -1003559652510,  # HRBP沟通群
