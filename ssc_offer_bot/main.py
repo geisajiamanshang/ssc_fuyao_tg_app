@@ -115,9 +115,9 @@ SSC Offer 审批流转自动化 主程序。
              不按环境区分前缀，测试、生产用同一个账号，避免两边都响应）
 
   场景十四：SSC在自己的收藏夹收到带"入职协议"关键词的消息（任何人发的/转发的）
-          -> 到Drive入职助手/输出文件夹找当日入职信息文件（2026-10-13_入职信息xxx），
-             再按「花名_入职协议_日期」找到每个人的入职协议Drive链接，发到工作TG（没有就用私人TG）
-          -> 每人一条"这是你的入职协议链接，请签字哦"草稿发到收藏夹，经审批码
+          -> 到Drive入职协议文件夹下找当月文件夹（2026年-10月），取当日入职的所有
+             入职协议（花名_入职协议_日期），从协议内容里读出私人TG
+          -> 每人一条"这是你的入职协议，签字哦"+协议Drive链接的草稿发到收藏夹，经审批码
              15（测试15）一次性放行：逐个私发，间隔随机5-10秒，发送成功即删草稿；
              只在生产环境启用（会私发真人，且关键词不分环境）
 
@@ -219,10 +219,9 @@ from self_eval import (
 )
 from onboarding_agreement import (
     AGREEMENT_LINK_MESSAGE,
-    OnboardingAgreementDriveRepository,
-    OnboardingAgreementFilesRepository,
+    OnboardingAgreementRepository,
     build_agreement_message,
-    build_agreement_recipients,
+    extract_private_tg,
     strip_trigger_keyword,
 )
 from training_sync import (
@@ -301,10 +300,7 @@ training_sync_events = StateStore(config.TRAINING_SYNC_STATE_PATH)
 training_sync_lock = asyncio.Lock()
 agreement_events = StateStore(config.ONBOARDING_AGREEMENT_STATE_PATH)
 agreement_lock = asyncio.Lock()
-agreement_drive = OnboardingAgreementDriveRepository(config.ONBOARDING_AGREEMENT_OUTPUT_FOLDER_ID)
-agreement_files = OnboardingAgreementFilesRepository([
-    config.ONBOARDING_AGREEMENT_OUTPUT_FOLDER_ID, config.ONBOARDING_AGREEMENT_UPLOAD_FOLDER_ID,
-])
+agreement_repo = OnboardingAgreementRepository(config.ONBOARDING_AGREEMENT_FOLDER_ID)
 training_sync_roster_repo = TrainingSyncRosterRepository(
     config.TRAINING_SYNC_ROSTER_SPREADSHEET_ID, config.TRAINING_SYNC_ROSTER_SHEET_GID,
 )
@@ -3124,13 +3120,13 @@ async def on_ssc_training_sync_trigger(event):
 @client.on(events.NewMessage())
 async def on_ssc_onboarding_agreement_trigger(event):
     """SSC收藏夹收到带"入职协议"关键词的消息（任何人发的/转发的都算）：到入职
-    助手/输出文件夹找当日入职信息文件，再按「花名_入职协议_日期」找每个人的入职
-    协议Drive链接，每人一条"这是你的入职协议链接，请签字哦"草稿进收藏夹，等审批码15统一
-    放行后逐个私发给这个人的工作TG（没有就用私人TG）。
+    协议文件夹的当月文件夹（2026年-10月）找当日入职的所有协议，读出协议里的私人
+    TG，每人一条"这是你的入职协议，签字哦"+协议链接的草稿进收藏夹，等审批码15
+    统一放行后逐个私发给这个人。
 
     收藏夹里机器人自己发的消息也会被这个监听器收到：提示经notify去掉了
     "入职协议"关键词；草稿是发给员工的文案，必然带这四个字，所以开头单独
-    识别并忽略。缺链接/缺TG的人不硬发，汇总提示SSC人工处理。
+    识别并忽略。协议里读不到TG的人不硬发，汇总提示SSC人工处理。
     """
     if event.chat_id in config.EXCLUDED_CHAT_IDS:
         return
@@ -3151,7 +3147,7 @@ async def on_ssc_onboarding_agreement_trigger(event):
         )
 
     if not config.ONBOARDING_AGREEMENT_ENABLED:
-        await notify("该流程未启用：入职助手/输出文件夹ID需要配置好，且只在生产环境生效。")
+        await notify("该流程未启用：协议文件夹ID需要配置好，且只在生产环境生效。")
         return
     key = f"{event.chat_id}:{event.message.id}"
     async with agreement_lock:
@@ -3160,34 +3156,29 @@ async def on_ssc_onboarding_agreement_trigger(event):
         agreement_events.set(key, {"status": "processing"})
     try:
         today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date().isoformat()
-        file_texts, seen_names = await asyncio.to_thread(agreement_drive.find_daily_files, today)
-        if not file_texts:
-            agreement_events.update(key, status="no_file", seen=len(seen_names))
-            shown = "、".join(seen_names[:10]) or "无"
-            await notify(
-                f"入职助手/输出文件夹里没有找到{today}的入职信息文件。机器人在该文件夹里"
-                f"实际看到{len(seen_names)}个文件：{shown}"
-                + ("（看到0个通常是该文件夹没有分享给机器人的Google服务账号）" if not seen_names else "")
-            )
+        agreements, diag = await asyncio.to_thread(agreement_repo.find_today_agreements, today)
+        if not agreements:
+            agreement_events.update(key, status="no_file", seen=len(diag["files"]))
+            if diag["month_folders"]:
+                where = (f"当月文件夹「{'、'.join(diag['month_folders'])}」里没有{today}入职的协议文件"
+                         f"（文件名需含日期，形如 花名_入职协议_日期），实际看到{len(diag['files'])}个文件："
+                         f"{'、'.join(diag['files'][:10]) or '无'}")
+            else:
+                where = (f"没有找到当月文件夹（形如 {today[:4]}年-{int(today[5:7])}月），"
+                         f"实际看到{len(diag['root_folders'])}个文件夹：{'、'.join(diag['root_folders'][:10]) or '无'}"
+                         + ("（看到0个通常是该文件夹没有分享给机器人的Google服务账号）"
+                            if not diag["root_folders"] and not diag["files"] else ""))
+            await notify("入职协议文件夹里" + where)
             return
-        recipients = build_agreement_recipients(file_texts)
-        need_link = [p["name"] for p in recipients if not p["link"] and p["tg"]]
-        found_links = (
-            await asyncio.to_thread(agreement_files.find_agreement_links, today, need_link)
-            if need_link else {}
-        )
         queued, problems = [], []
-        for person in recipients:
-            person["link"] = person["link"] or found_links.get(person["name"], "")
-            if not person["link"]:
-                problems.append(
-                    f"{person['name']}：没找到{today}的协议文件（文件名需形如 花名_入职协议_日期，"
-                    "放在入职助手/输出或协议上传文件夹，并已分享给机器人）"
-                    if person["tg"] else f"{person['name']}：没有工作TG/私人TG"
-                )
+        for agreement in agreements:
+            person = {"name": agreement["name"], "link": agreement["link"]}
+            person["tg"], person["tg_source"] = extract_private_tg(agreement["text"])
+            if agreement["error"]:
+                problems.append(f"{person['name']}：协议文件读取失败（{agreement['error']}）")
                 continue
             if not person["tg"]:
-                problems.append(f"{person['name']}：没有工作TG/私人TG")
+                problems.append(f"{person['name']}：协议里没找到私人TG")
                 continue
             candidate = f"agreement_link:{today}:{person['tg'].casefold()}"
             if (state.get(candidate) or {}).get("stage") == "agreement_link_sent":
@@ -3210,7 +3201,7 @@ async def on_ssc_onboarding_agreement_trigger(event):
                 })
                 state.update(candidate, stage="waiting_agreement_link_approval")
             queued.append(f"{person['name']} → {person['tg']}（{person['tg_source']}）")
-        summary = [f"当日新员工协议链接：已生成{len(queued)}条待私发草稿，"
+        summary = [f"当日新员工协议：已生成{len(queued)}条待私发草稿，"
                    f"确认无误后发送 {config.ONBOARDING_AGREEMENT_APPROVAL_CODE} 放行。"]
         if queued:
             summary.append("收件人：\n" + "\n".join(queued))

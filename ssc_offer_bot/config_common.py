@@ -224,21 +224,15 @@ TRAINING_SYNC_ROSTER_SHEET_GID = int(os.environ.get(
     "TRAINING_SYNC_ROSTER_SHEET_GID", "1173062379"
 ))
 
-# 场景十四：SSC收藏夹出现"入职协议"关键词后，到入职助手/输出文件夹（单独配置，
-# 不复用新人培训那个文件夹ID）找当日入职信息文件（文件名形如
-# 2026-10-13_入职信息xxx），再按「花名_入职协议_日期」找到每个人的入职协议，把它的Drive链接私发给这个人的
-# 工作TG（没有就用私人TG）；每人一条草稿进收藏夹，审批码15统一放行。
+# 场景十四：SSC收藏夹出现"入职协议"关键词后，到入职协议文件夹下找当月文件夹
+# （例：2026年-10月），取里面当日入职的所有入职协议（文件名 花名_入职协议_日期），
+# 从协议内容里读出私人TG，把协议的Drive链接私发给他；每人一条草稿进收藏夹，
+# 审批码15统一放行。
 ONBOARDING_AGREEMENT_TRIGGER_KEYWORD = "入职协议"
-# 入职助手/输出：https://drive.google.com/drive/u/1/folders/1-oU9osg6xskVunLzZf9NvRGPzr8H5hmR
+# https://drive.google.com/drive/u/1/folders/1tmNkfhM35ZbYYXu1UncC7dZCsbx_BUJq
 # 这个文件夹要分享给机器人的Google服务账号，否则机器人看不到里面的文件。
-ONBOARDING_AGREEMENT_OUTPUT_FOLDER_ID = os.environ.get(
-    "ONBOARDING_AGREEMENT_OUTPUT_FOLDER_ID", "1-oU9osg6xskVunLzZf9NvRGPzr8H5hmR"
-)
-
-# 入职协议文件（花名_入职协议_日期）除了生成在上面的输出文件夹，步骤里还会上传
-# 到这个文件夹；两个都查，也要分享给机器人的Google服务账号。
-ONBOARDING_AGREEMENT_UPLOAD_FOLDER_ID = os.environ.get(
-    "ONBOARDING_AGREEMENT_UPLOAD_FOLDER_ID", "1zvkMaEO52vVXCC5mN7FsNJ1-JfAySDHF"
+ONBOARDING_AGREEMENT_FOLDER_ID = os.environ.get(
+    "ONBOARDING_AGREEMENT_FOLDER_ID", "1tmNkfhM35ZbYYXu1UncC7dZCsbx_BUJq"
 )
 
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
