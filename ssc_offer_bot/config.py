@@ -80,6 +80,10 @@ TRAINING_SYNC_APPROVAL_CODE = "测试14" if ENVIRONMENT == "test" else "14"
 # 跟111一样一次释放多条，不是"每次审批消费一条"，所以不放进APPROVAL_CODES，
 # 由独立监听器处理。
 ONBOARDING_AGREEMENT_APPROVAL_CODE = "测试15" if ENVIRONMENT == "test" else "15"
+# 钱包提醒：收藏夹发"钱包提醒"后，对没填钱包表单的今日入职员工每人生成一条提醒草稿，
+# 审批码17一次性放行全部（逐个私发工作TG，间隔随机5-10秒，发送成功即删草稿）——
+# 跟15一样一次释放多条，不放进APPROVAL_CODES，由独立监听器处理。
+WALLET_REMINDER_APPROVAL_CODE = "测试17" if ENVIRONMENT == "test" else "17"
 # 审批码151：收藏夹收到后把当日所有入职协议汇总，一条消息私发给领导审批
 # （ONBOARDING_AGREEMENT_LEADER_TG）。这个码本身就是SSC的"发送"指令，不先出草稿；
 # 同样不放进APPROVAL_CODES，由独立监听器处理（跟"15"精确匹配，互不触发）。
@@ -152,6 +156,11 @@ TRAINING_SYNC_STATE_PATH = DB_PATH + ".training_sync.json"
 # 功能会私发真人，所以只在生产环境启用。
 ONBOARDING_AGREEMENT_ENABLED = ENVIRONMENT == "prod" and bool(ONBOARDING_AGREEMENT_FOLDER_ID)
 ONBOARDING_AGREEMENT_STATE_PATH = DB_PATH + ".onboarding_agreement.json"
+# 触发关键词不分环境、会私发真人，所以只在生产环境启用（原因同"员工自评"）。
+WALLET_REMINDER_ENABLED = ENVIRONMENT == "prod" and bool(
+    TRAINING_SYNC_ROSTER_SPREADSHEET_ID and WALLET_REMINDER_FORM_SPREADSHEET_ID
+)
+WALLET_REMINDER_STATE_PATH = DB_PATH + ".wallet_reminder.json"
 # 复用 GROUP_REGULARIZATION_SYNC 作为数据来源和无详情版目标群，该群ID配置好
 # 之前自动跳过，不报错。
 DAILY_SYNC_ENABLED = bool(GROUP_REGULARIZATION_SYNC)

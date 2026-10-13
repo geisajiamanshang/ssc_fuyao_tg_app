@@ -124,12 +124,19 @@ SSC Offer 审批流转自动化 主程序。
              "x人入职协议，请萌萌姐审批"消息，直接私发给萌萌姐（@woshidaimeng87）；
              同一天内容没变的话重复发151不会重复发送
 
+  场景十五：SSC在自己的收藏夹收到"钱包提醒"关键词
+          -> 花名册（机器人）AR列是今天的人（B、C列确认是谁），去钱包表单里找F列是
+             "首次提交（新人入职）"且C、D列对得上的条目；没找到的人就是没填写
+          -> 每个没填写的人一条提醒草稿发到收藏夹，经审批码17（测试17）一次性放行：
+             逐个私发给他的工作TG（花名册AE列），间隔随机5-10秒，发送成功即删草稿；
+             只在生产环境启用（会私发真人，且关键词不分环境）
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92/测试111/测试13/测试14/测试15”，
-     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92/111/13/14/15”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92/测试111/测试13/测试14/测试15/测试17”，
+     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92/111/13/14/15/17”。
 """
 
 import asyncio
@@ -228,6 +235,11 @@ from onboarding_agreement import (
     extract_private_tg,
     strip_trigger_keyword,
 )
+from wallet_reminder import (
+    WALLET_REMINDER_MESSAGE,
+    plan_wallet_reminders,
+    person_label,
+)
 from training_sync import (
     TRAINING_SYNC_HEADER,
     TrainingSyncRosterRepository,
@@ -300,6 +312,11 @@ account_application_sheets = AccountApplicationSheetsRepository(
 )
 wallet_sync_events = StateStore(config.DB_PATH + ".wallet_sync.json")
 wallet_sync_lock = asyncio.Lock()
+wallet_reminder_events = StateStore(config.WALLET_REMINDER_STATE_PATH)
+wallet_reminder_lock = asyncio.Lock()
+wallet_form_repo = TrainingSyncRosterRepository(
+    config.WALLET_REMINDER_FORM_SPREADSHEET_ID, config.WALLET_REMINDER_FORM_SHEET_GID, label="钱包表单",
+)
 training_sync_events = StateStore(config.TRAINING_SYNC_STATE_PATH)
 training_sync_lock = asyncio.Lock()
 agreement_events = StateStore(config.ONBOARDING_AGREEMENT_STATE_PATH)
@@ -3272,6 +3289,155 @@ async def on_ssc_onboarding_agreement_release(event):
                 log.exception("[场景14] 私发给%s失败，草稿msg_id=%s", item["destination"], item["draft_id"])
                 await client.send_message(
                     reviewer.id, f"私发给{item['destination']}失败：{str(exc)[:150]}（不会自动重发）",
+                    parse_mode=None,
+                )
+        if index < len(pending) - 1:
+            await asyncio.sleep(random.uniform(5, 10))
+
+
+# ==================== 场景十五：钱包提醒 ====================
+@client.on(events.NewMessage())
+async def on_ssc_wallet_reminder_trigger(event):
+    """SSC收藏夹收到带"钱包提醒"关键词的消息：比对花名册（机器人）今日入职的人和
+    钱包表单"首次提交（新人入职）"条目，没填写的人每人一条提醒草稿进收藏夹，
+    等审批码17统一放行后逐个私发到他的工作TG（花名册AE列）。
+
+    收藏夹里机器人自己发的提示也会被这个监听器收到：提示经notify去掉了
+    "钱包提醒"关键词，提醒草稿的文案里本来就没有这个词，不会自己触发自己。
+    表格读不到（没分享给服务账号）、AE列没有可用工作TG的人都如实告诉SSC，不硬发。
+    """
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    if config.WALLET_REMINDER_TRIGGER_KEYWORD not in text:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id:
+        return
+
+    async def notify(message):
+        await client.send_message(
+            reviewer.id,
+            strip_trigger_keyword(message, config.WALLET_REMINDER_TRIGGER_KEYWORD),
+            parse_mode=None,
+        )
+
+    if not config.WALLET_REMINDER_ENABLED:
+        await notify("该流程未启用：花名册/钱包表单的表格ID需要配置好，且只在生产环境生效。")
+        return
+    key = f"{event.chat_id}:{event.message.id}"
+    async with wallet_reminder_lock:
+        if wallet_reminder_events.get(key):
+            return
+        wallet_reminder_events.set(key, {"status": "processing"})
+    try:
+        today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date()
+        roster_rows = await asyncio.to_thread(training_sync_roster_repo.load_rows)
+        wallet_rows = await asyncio.to_thread(wallet_form_repo.load_rows)
+        plan = plan_wallet_reminders(roster_rows, wallet_rows, today)
+        if not plan["hired"]:
+            wallet_reminder_events.update(key, status="nobody_today")
+            await notify(f"花名册里今天（{today.isoformat()}）没有入职的人（AR列），不需要提醒。")
+            return
+        queued, skipped = [], []
+        for person in plan["to_remind"]:
+            candidate = f"wallet_reminder:{today.isoformat()}:{person['tg'].casefold()}"
+            if (state.get(candidate) or {}).get("stage") == "wallet_reminder_sent":
+                skipped.append(f"{person_label(person)}（今天已提醒过）")
+                continue
+            if any(i.get("candidate") == candidate and i.get("status") == "pending"
+                   for i in outbox.all().values()):
+                skipped.append(f"{person_label(person)}（已有待发送草稿）")
+                continue
+            async with ssc_send_lock:
+                draft = await client.send_message(reviewer.id, WALLET_REMINDER_MESSAGE, parse_mode=None)
+                outbox.set(str(draft.id), {
+                    "draft_id": draft.id, "destination": person["tg"], "reply_to": None,
+                    "candidate": candidate, "expected_stage": "waiting_wallet_reminder_approval",
+                    "updates": {"stage": "wallet_reminder_sent"}, "id_field": None,
+                    "kind": "wallet_reminder", "status": "pending",
+                    "review_chat_id": reviewer.id,
+                    "approval_code": str(config.WALLET_REMINDER_APPROVAL_CODE),
+                    "delete_draft_after_send": True,
+                })
+                state.update(candidate, stage="waiting_wallet_reminder_approval")
+            queued.append(f"{person_label(person)} → {person['tg']}")
+        summary = [
+            f"今日（{today.isoformat()}）入职{len(plan['hired'])}人，已填写钱包表单{len(plan['filled'])}人，"
+            f"需要提醒{len(plan['to_remind']) + len(plan['no_tg'])}人。"
+        ]
+        if queued:
+            summary.append(
+                f"已生成{len(queued)}条提醒草稿，确认无误后发送 {config.WALLET_REMINDER_APPROVAL_CODE} 放行：\n"
+                + "\n".join(queued)
+            )
+        if skipped:
+            summary.append("跳过：\n" + "\n".join(skipped))
+        if plan["no_tg"]:
+            summary.append("工作TG（AE列）为空或认不出来，请人工提醒：\n"
+                           + "\n".join(person_label(p) for p in plan["no_tg"]))
+        if not plan["to_remind"] and not plan["no_tg"]:
+            summary.append("今天入职的人都已填写，不需要提醒。")
+        wallet_reminder_events.update(
+            key, status="queued", hired=len(plan["hired"]), queued=len(queued), no_tg=len(plan["no_tg"]),
+        )
+        await notify("\n".join(summary))
+    except Exception as exc:
+        wallet_reminder_events.update(key, status="failed")
+        log.exception("[场景15] 处理msg_id=%s失败", event.message.id)
+        await notify("该流程生成失败，请查看机器人日志。错误：" + str(exc)[:200])
+
+
+@client.on(events.NewMessage())
+async def on_ssc_wallet_reminder_release(event):
+    """SSC在自己的收藏夹发送WALLET_REMINDER_APPROVAL_CODE（17/测试17），一次性放行
+    本轮全部待私发的钱包提醒草稿：逐个私发，间隔随机5-10秒，每条发送成功立即
+    删除对应草稿；发送失败的标failed并告诉SSC是谁，不自动重发（避免重复打扰）。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    if (event.raw_text or "").strip() != config.WALLET_REMINDER_APPROVAL_CODE:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.WALLET_REMINDER_ENABLED:
+        return
+    pending = sorted(
+        (i for i in outbox.all().values()
+         if i.get("kind") == "wallet_reminder" and i.get("status") == "pending"
+         and i.get("review_chat_id") == reviewer.id),
+        key=lambda i: i["draft_id"],
+    )
+    for index, item in enumerate(pending):
+        key = str(item["draft_id"])
+        current = outbox.all().get(key)
+        if not current or current.get("status") != "pending":
+            continue
+        async with ssc_send_lock:
+            try:
+                draft = await client.get_messages(reviewer.id, ids=item["draft_id"])
+                if not draft or not draft.raw_text:
+                    outbox.update(key, status="failed")
+                    await client.send_message(
+                        reviewer.id, f"{item['destination']} 的提醒草稿已不存在，未发送。", parse_mode=None,
+                    )
+                    continue
+                outbox.update(key, status="sending", approval_msg_id=event.message.id)
+                recipient = await client.get_entity(item["destination"])
+                sent = await client.send_message(recipient, draft.raw_text, parse_mode=None)
+                state.update(item["candidate"], **item["updates"])
+                outbox.update(key, status="sent", sent_msg_id=sent.id)
+                log.info("[场景15] 已私发提醒给%s msg_id=%s（%s/%s）",
+                         item["destination"], sent.id, index + 1, len(pending))
+                try:
+                    await client.delete_messages(reviewer.id, [item["draft_id"]])
+                except Exception:
+                    log.exception("[场景15] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
+            except Exception as exc:
+                outbox.update(key, status="failed")
+                log.exception("[场景15] 私发提醒给%s失败，草稿msg_id=%s", item["destination"], item["draft_id"])
+                await client.send_message(
+                    reviewer.id, f"私发提醒给{item['destination']}失败：{str(exc)[:150]}（不会自动重发）",
                     parse_mode=None,
                 )
         if index < len(pending) - 1:

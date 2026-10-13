@@ -238,6 +238,16 @@ ONBOARDING_AGREEMENT_FOLDER_ID = os.environ.get(
 # 收藏夹发审批码151：把当日所有入职协议的链接汇总成一条消息，私发给萌萌姐审批。
 ONBOARDING_AGREEMENT_LEADER_TG = os.environ.get("ONBOARDING_AGREEMENT_LEADER_TG", "@woshidaimeng87")
 
+# 场景十五：SSC收藏夹出现"钱包提醒"关键词后，比对花名册（机器人）（同培训同步那张
+# 表）里今日入职（AR列）的人和钱包表单里"首次提交（新人入职）"的条目，没填写的人
+# 向工作TG（花名册AE列）发提醒；草稿先进收藏夹，审批码17放行。两张表都要分享给
+# 机器人的Google服务账号。
+WALLET_REMINDER_TRIGGER_KEYWORD = "钱包提醒"
+WALLET_REMINDER_FORM_SPREADSHEET_ID = os.environ.get(
+    "WALLET_REMINDER_FORM_SPREADSHEET_ID", "1SrvH7LuKqlekXzUUxbMAY3VNT54ApXNqG6bki9bnhXQ"
+)
+WALLET_REMINDER_FORM_SHEET_GID = int(os.environ.get("WALLET_REMINDER_FORM_SHEET_GID", "639628649"))
+
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({
     -1003559652510,  # HRBP沟通群

@@ -148,9 +148,10 @@ class TrainingSyncRosterRepository:
     分页（哪怕分页被改名也能找到），用Sheets API v4读取A:AZ整列范围
     （AR列在第44列，落在这个范围内）。"""
 
-    def __init__(self, spreadsheet_id, sheet_gid):
+    def __init__(self, spreadsheet_id, sheet_gid, label="花名册（机器人）"):
         self.spreadsheet_id = spreadsheet_id
         self.sheet_gid = int(sheet_gid)
+        self.label = label
 
     def _sheet_title(self, session, auth_params):
         response = session.get(
@@ -163,7 +164,7 @@ class TrainingSyncRosterRepository:
             props = sheet.get("properties", {})
             if props.get("sheetId") == self.sheet_gid:
                 return props["title"]
-        raise FileNotFoundError(f"花名册（机器人）里没有gid={self.sheet_gid}的工作表")
+        raise FileNotFoundError(f"{self.label}里没有gid={self.sheet_gid}的工作表")
 
     def load_rows(self):
         """返回整张表按行的二维列表（Sheets API原样返回，行尾空单元格
