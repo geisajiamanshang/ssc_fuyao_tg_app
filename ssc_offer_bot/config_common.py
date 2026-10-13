@@ -224,6 +224,12 @@ TRAINING_SYNC_ROSTER_SHEET_GID = int(os.environ.get(
     "TRAINING_SYNC_ROSTER_SHEET_GID", "1173062379"
 ))
 
+# 场景十四：SSC收藏夹出现"入职协议"关键词后，到入职助手/输出文件夹（复用
+# ONBOARDING_TRAINING_OUTPUT_FOLDER_ID）找当日入职信息文件（文件名形如
+# 2026-10-13_入职信息xxx），把当日入职每个人的转正审批表链接私发给这个人的
+# 工作TG（没有就用私人TG）；每人一条草稿进收藏夹，审批码15统一放行。
+ONBOARDING_AGREEMENT_TRIGGER_KEYWORD = "入职协议"
+
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({
     -1003559652510,  # HRBP沟通群

@@ -75,6 +75,11 @@ WALLET_SYNC_APPROVAL_CODE = "测试13" if ENVIRONMENT == "test" else "13"
 # "明天"要培训的人，生成的【次日培训信息同步】草稿经这个审批码放行到
 # 共享服务中心-远程培训沟通群。
 TRAINING_SYNC_APPROVAL_CODE = "测试14" if ENVIRONMENT == "test" else "14"
+# 入职协议关键词触发后，每个当日入职的人生成一条"转正审批表链接"私发草稿，
+# 审批码15一次性放行全部（逐个私发，间隔随机5-10秒，发送成功即删草稿）——
+# 跟111一样一次释放多条，不是"每次审批消费一条"，所以不放进APPROVAL_CODES，
+# 由独立监听器处理。
+ONBOARDING_AGREEMENT_APPROVAL_CODE = "测试15" if ENVIRONMENT == "test" else "15"
 APPROVAL_CODES = frozenset({
     OFFER_APPROVAL_CODE,
     REGULARIZATION_APPROVAL_CODE,
@@ -139,6 +144,10 @@ TRAINING_SYNC_ENABLED = ENVIRONMENT == "prod" and bool(
     GROUP_REMOTE_TRAINING and TRAINING_SYNC_ROSTER_SPREADSHEET_ID
 )
 TRAINING_SYNC_STATE_PATH = DB_PATH + ".training_sync.json"
+# 入职协议触发词不按环境区分前缀，测试、生产共用同一个Telegram账号，且这个
+# 功能会私发真人，所以只在生产环境启用。
+ONBOARDING_AGREEMENT_ENABLED = ENVIRONMENT == "prod" and bool(ONBOARDING_TRAINING_OUTPUT_FOLDER_ID)
+ONBOARDING_AGREEMENT_STATE_PATH = DB_PATH + ".onboarding_agreement.json"
 # 复用 GROUP_REGULARIZATION_SYNC 作为数据来源和无详情版目标群，该群ID配置好
 # 之前自动跳过，不报错。
 DAILY_SYNC_ENABLED = bool(GROUP_REGULARIZATION_SYNC)

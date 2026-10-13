@@ -196,14 +196,17 @@ ns["timedelta"] = timedelta
 exec(compile(ast.Module(body=functions, type_ignores=[]), "<training_sync_handler>", "exec"), ns)
 
 
+# 处理器按"今天+1天"算明天，样例行的日期必须跟着动态取，不能写死某个日期。
+_TOMORROW = (datetime.now(ZoneInfo("Asia/Shanghai")).date() + timedelta(days=1)).isoformat()
+
 EXAMPLE_ROWS = [
     ["表头"],
     _row(name="毛毛", org_unit="运营中心", department="AIGC原创部",
-         position="AI 视频生成师", training_date="2026-10-13"),
+         position="AI 视频生成师", training_date=_TOMORROW),
     _row(name="小海螺", org_unit="运营中心", department="AIGC原创部",
-         position="AI 视频生成师", training_date="2026-10-13"),
+         position="AI 视频生成师", training_date=_TOMORROW),
     _row(name="元宝", org_unit="运营中心", department="运营1部-产品运营组",
-         position="运营专员", training_date="2026-10-13"),
+         position="运营专员", training_date=_TOMORROW),
     _row(name="跟明天无关的人", org_unit="运营中心", department="x",
          position="y", training_date="2099-01-01"),
 ]

@@ -114,12 +114,19 @@ SSC Offer 审批流转自动化 主程序。
              培训沟通群；只在生产环境启用（原因同"员工自评"：触发关键词
              不按环境区分前缀，测试、生产用同一个账号，避免两边都响应）
 
+  场景十四：SSC在自己的收藏夹收到带"入职协议"关键词的消息（任何人发的/转发的）
+          -> 到Drive入职助手/输出文件夹找当日入职信息文件（2026-10-13_入职信息xxx），
+             取当日入职每个人的转正审批表链接，工作TG（没有就用私人TG）
+          -> 每人一条"这是你的转正审批表链接，请签字哦"草稿发到收藏夹，经审批码
+             15（测试15）一次性放行：逐个私发，间隔随机5-10秒，发送成功即删草稿；
+             只在生产环境启用（会私发真人，且关键词不分环境）
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92/测试111/测试13/测试14”，
-     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92/111/13/14”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92/测试111/测试13/测试14/测试15”，
+     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92/111/13/14/15”。
 """
 
 import asyncio
@@ -210,6 +217,11 @@ from self_eval import (
     format_self_eval_preview,
     parse_self_eval_response,
 )
+from onboarding_agreement import (
+    OnboardingAgreementDriveRepository,
+    build_agreement_message,
+    build_agreement_recipients,
+)
 from training_sync import (
     TRAINING_SYNC_HEADER,
     TrainingSyncRosterRepository,
@@ -284,6 +296,9 @@ wallet_sync_events = StateStore(config.DB_PATH + ".wallet_sync.json")
 wallet_sync_lock = asyncio.Lock()
 training_sync_events = StateStore(config.TRAINING_SYNC_STATE_PATH)
 training_sync_lock = asyncio.Lock()
+agreement_events = StateStore(config.ONBOARDING_AGREEMENT_STATE_PATH)
+agreement_lock = asyncio.Lock()
+agreement_drive = OnboardingAgreementDriveRepository(config.ONBOARDING_TRAINING_OUTPUT_FOLDER_ID)
 training_sync_roster_repo = TrainingSyncRosterRepository(
     config.TRAINING_SYNC_ROSTER_SPREADSHEET_ID, config.TRAINING_SYNC_ROSTER_SHEET_GID,
 )
@@ -3097,6 +3112,151 @@ async def on_ssc_training_sync_trigger(event):
             "该流程生成失败，请查看机器人日志。错误：" + str(exc)[:200],
             parse_mode=None,
         )
+
+
+# ==================== 场景十四：入职协议——转正审批表链接私发 ====================
+@client.on(events.NewMessage())
+async def on_ssc_onboarding_agreement_trigger(event):
+    """SSC收藏夹收到带"入职协议"关键词的消息（任何人发的/转发的都算）：到入职
+    助手/输出文件夹找当日入职信息文件，取当日入职每个人的转正审批表链接，
+    每人一条"这是你的转正审批表链接，请签字哦"草稿进收藏夹，等审批码15统一
+    放行后逐个私发给这个人的工作TG（没有就用私人TG）。
+
+    收藏夹里机器人自己发的提示也会被这个监听器收到，所以下面所有提示都
+    刻意不出现"入职协议"这四个字，避免自己触发自己；草稿本身是发给员工的
+    文案，也不含这个关键词。缺链接/缺TG的人不硬发，汇总提示SSC人工处理。
+    """
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    if config.ONBOARDING_AGREEMENT_TRIGGER_KEYWORD not in text:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id:
+        return
+    if not config.ONBOARDING_AGREEMENT_ENABLED:
+        await client.send_message(
+            reviewer.id, "该流程未启用：入职助手/输出文件夹ID需要配置好，且只在生产环境生效。",
+            parse_mode=None,
+        )
+        return
+    key = f"{event.chat_id}:{event.message.id}"
+    async with agreement_lock:
+        if agreement_events.get(key):
+            return
+        agreement_events.set(key, {"status": "processing"})
+    try:
+        today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date().isoformat()
+        file_texts = await asyncio.to_thread(agreement_drive.find_daily_files, today)
+        if not file_texts:
+            agreement_events.update(key, status="no_file")
+            await client.send_message(
+                reviewer.id, f"入职助手/输出文件夹里没有找到{today}的入职信息文件。", parse_mode=None,
+            )
+            return
+        recipients = build_agreement_recipients(file_texts)
+        queued, problems = [], []
+        for person in recipients:
+            if not person["link"]:
+                problems.append(f"{person['name']}：文件里没找到转正审批表链接")
+                continue
+            if not person["tg"]:
+                problems.append(f"{person['name']}：没有工作TG/私人TG")
+                continue
+            candidate = f"agreement_link:{today}:{person['tg'].casefold()}"
+            if (state.get(candidate) or {}).get("stage") == "agreement_link_sent":
+                continue
+            if any(i.get("candidate") == candidate and i.get("status") == "pending"
+                   for i in outbox.all().values()):
+                continue
+            async with ssc_send_lock:
+                draft = await client.send_message(
+                    reviewer.id, build_agreement_message(person["link"]), parse_mode=None,
+                )
+                outbox.set(str(draft.id), {
+                    "draft_id": draft.id, "destination": person["tg"], "reply_to": None,
+                    "candidate": candidate, "expected_stage": "waiting_agreement_link_approval",
+                    "updates": {"stage": "agreement_link_sent"}, "id_field": None,
+                    "kind": "onboarding_agreement_link", "status": "pending",
+                    "review_chat_id": reviewer.id,
+                    "approval_code": str(config.ONBOARDING_AGREEMENT_APPROVAL_CODE),
+                    "delete_draft_after_send": True,
+                })
+                state.update(candidate, stage="waiting_agreement_link_approval")
+            queued.append(f"{person['name']} → {person['tg']}（{person['tg_source']}）")
+        summary = [f"当日新员工转正审批表链接：已生成{len(queued)}条待私发草稿，"
+                   f"确认无误后发送 {config.ONBOARDING_AGREEMENT_APPROVAL_CODE} 放行。"]
+        if queued:
+            summary.append("收件人：\n" + "\n".join(queued))
+        if problems:
+            summary.append("未生成（请人工处理）：\n" + "\n".join(problems))
+        if not queued and not problems:
+            summary.append("今天的人之前都已经发送过，没有新增。")
+        agreement_events.update(key, status="queued", queued=len(queued), problems=len(problems))
+        await client.send_message(reviewer.id, "\n".join(summary), parse_mode=None)
+    except Exception as exc:
+        agreement_events.update(key, status="failed")
+        log.exception("[场景14] 处理msg_id=%s失败", event.message.id)
+        await client.send_message(
+            reviewer.id, "该流程生成失败，请查看机器人日志。错误：" + str(exc)[:200], parse_mode=None,
+        )
+
+
+@client.on(events.NewMessage())
+async def on_ssc_onboarding_agreement_release(event):
+    """SSC在自己的收藏夹发送ONBOARDING_AGREEMENT_APPROVAL_CODE（15/测试15），
+    一次性放行本轮全部待私发的转正审批表链接草稿：逐个私发，间隔随机5-10秒，
+    每条发送成功立即删除对应草稿；发送失败的标failed并告诉SSC是谁，不自动重发
+    （避免重复私发）。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    if (event.raw_text or "").strip() != config.ONBOARDING_AGREEMENT_APPROVAL_CODE:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.ONBOARDING_AGREEMENT_ENABLED:
+        return
+    pending = sorted(
+        (i for i in outbox.all().values()
+         if i.get("kind") == "onboarding_agreement_link" and i.get("status") == "pending"
+         and i.get("review_chat_id") == reviewer.id),
+        key=lambda i: i["draft_id"],
+    )
+    for index, item in enumerate(pending):
+        key = str(item["draft_id"])
+        current = outbox.all().get(key)
+        if not current or current.get("status") != "pending":
+            continue
+        async with ssc_send_lock:
+            try:
+                draft = await client.get_messages(reviewer.id, ids=item["draft_id"])
+                if not draft or not draft.raw_text:
+                    outbox.update(key, status="failed")
+                    await client.send_message(
+                        reviewer.id, f"{item['destination']} 的草稿已不存在，未发送。", parse_mode=None,
+                    )
+                    continue
+                outbox.update(key, status="sending", approval_msg_id=event.message.id)
+                recipient = await client.get_entity(item["destination"])
+                sent = await client.send_message(recipient, draft.raw_text, parse_mode=None)
+                state.update(item["candidate"], **item["updates"])
+                outbox.update(key, status="sent", sent_msg_id=sent.id)
+                log.info("[场景14] 已私发给%s msg_id=%s（%s/%s）",
+                         item["destination"], sent.id, index + 1, len(pending))
+                try:
+                    await client.delete_messages(reviewer.id, [item["draft_id"]])
+                except Exception:
+                    log.exception("[场景14] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
+            except Exception as exc:
+                outbox.update(key, status="failed")
+                log.exception("[场景14] 私发给%s失败，草稿msg_id=%s", item["destination"], item["draft_id"])
+                await client.send_message(
+                    reviewer.id, f"私发给{item['destination']}失败：{str(exc)[:150]}（不会自动重发）",
+                    parse_mode=None,
+                )
+        if index < len(pending) - 1:
+            await asyncio.sleep(random.uniform(5, 10))
 
 
 async def main():
