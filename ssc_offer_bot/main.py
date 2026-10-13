@@ -125,8 +125,8 @@ SSC Offer 审批流转自动化 主程序。
              同一天内容没变的话重复发151不会重复发送
 
   场景十五：SSC在自己的收藏夹收到"钱包提醒"关键词
-          -> 花名册（机器人）AR列是今天的人（B、C列确认是谁），去钱包表单里找F列是
-             "首次提交（新人入职）"且C、D列对得上的条目；没找到的人就是没填写
+          -> 花名册（机器人）AR列是今天的人，用B列去钱包表单里找：D列等于这个人的B列
+             且F列是"首次提交（新人入职）"的条目；没找到的人就是没填写
           -> 每个没填写的人一条提醒草稿发到收藏夹，经审批码17（测试17）一次性放行：
              逐个私发给他的工作TG（花名册AE列），间隔随机5-10秒，发送成功即删草稿；
              只在生产环境启用（会私发真人，且关键词不分环境）
@@ -3376,7 +3376,10 @@ async def on_ssc_wallet_reminder_trigger(event):
         if plan["no_tg"]:
             summary.append("工作TG（AE列）为空或认不出来，请人工提醒：\n"
                            + "\n".join(person_label(p) for p in plan["no_tg"]))
-        if not plan["to_remind"] and not plan["no_tg"]:
+        if plan["unverifiable"]:
+            summary.append("花名册B列为空，没法核对是否填写，请人工确认：\n"
+                           + "\n".join(person_label(p) for p in plan["unverifiable"]))
+        if not plan["to_remind"] and not plan["no_tg"] and not plan["unverifiable"]:
             summary.append("今天入职的人都已填写，不需要提醒。")
         wallet_reminder_events.update(
             key, status="queued", hired=len(plan["hired"]), queued=len(queued), no_tg=len(plan["no_tg"]),

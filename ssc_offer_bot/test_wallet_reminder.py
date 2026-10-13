@@ -30,7 +30,7 @@ def roster_row(b="", c="", ar="", ae=""):
     return row
 
 
-def form_row(c="", d="", f=""):
+def form_row(d="", f="", c=""):
     row = [""] * 6
     row[2], row[3], row[5] = c, d, f
     return row
@@ -43,30 +43,36 @@ FIRST = "首次提交（新人入职）"
 class ParsingTests(unittest.TestCase):
     def test_roster_people_and_date_filter(self):
         rows = [HEADER,
-                roster_row("DN0001", "毛小婕", TODAY_STR, "@maoxiaojie01"),
-                roster_row("DN0002", "郑元宝", "2020-01-01", "@zyb"),
+                roster_row("DN1", "毛小婕", TODAY_STR, "@maoxiaojie01"),
+                roster_row("DN2", "郑元宝", "2020-01-01", "@zyb"),
                 roster_row("", "", TODAY_STR, "@nobody"),          # B、C都空：跳过
-                roster_row("DN0003", "奕辰", "not a date")]
+                roster_row("DN3", "奕辰", "not a date")]
         people = parse_roster_people(rows)
-        self.assertEqual([p["key_c"] for p in people], ["毛小婕", "郑元宝", "奕辰"])
-        self.assertEqual([p["key_c"] for p in select_hired_on(people, TODAY)], ["毛小婕"])
-        self.assertEqual(people[0]["work_tg"], "@maoxiaojie01")
+        self.assertEqual([p["key_b"] for p in people], ["DN1", "DN2", "DN3"])
+        self.assertEqual([p["key_b"] for p in select_hired_on(people, TODAY)], ["DN1"])
+        self.assertEqual((people[0]["name_c"], people[0]["work_tg"]), ("毛小婕", "@maoxiaojie01"))
 
-    def test_only_first_submit_new_hire_entries_count(self):
+    def test_only_first_submit_new_hire_entries_count_and_key_is_column_d(self):
         rows = [["h"] * 6,
-                form_row("DN0001", "毛小婕", FIRST),
-                form_row("DN0002", "郑元宝", "变更地址"),
-                form_row("DN0003", "奕辰", "首次提交(新人入职)"),   # 半角括号也认
-                form_row("", "", FIRST)]
-        entries = parse_wallet_entries(rows)
-        self.assertEqual(len(entries), 2)
+                form_row("DN1", FIRST, c="乱填"),
+                form_row("DN2", "变更地址"),
+                form_row("DN3", "首次提交(新人入职)"),   # 半角括号也认
+                form_row("", FIRST)]
+        self.assertEqual(parse_wallet_entries(rows), {"dn1", "dn3"})
 
-    def test_matching_is_normalized_and_order_free(self):
-        entries = parse_wallet_entries([["h"] * 6, form_row("毛小婕", "dn0001 ", FIRST)])
-        self.assertTrue(has_filled({"key_b": "DN0001", "key_c": "毛小婕"}, entries))
-        self.assertFalse(has_filled({"key_b": "DN0001", "key_c": "别人"}, entries))   # 两个值必须都对上
-        self.assertTrue(has_filled({"key_b": "", "key_c": "毛小婕"}, entries))        # 只有一个值时按这一个
-        self.assertFalse(has_filled({"key_b": "", "key_c": ""}, entries))
+    def test_match_is_roster_b_vs_form_d_only(self):
+        entries = parse_wallet_entries([["h"] * 6, form_row(" dn0001 ", FIRST, c="毛小婕")])
+        self.assertTrue(has_filled({"key_b": "DN0001", "name_c": "毛小婕"}, entries))
+        self.assertFalse(has_filled({"key_b": "DN0002", "name_c": "毛小婕"}, entries))   # C列相同也不算
+        self.assertFalse(has_filled({"key_b": "", "name_c": "毛小婕"}, entries))
+        # B列的值只出现在表单C列也不算
+        entries = parse_wallet_entries([["h"] * 6, form_row("别人", FIRST, c="DN0001")])
+        self.assertFalse(has_filled({"key_b": "DN0001", "name_c": "x"}, entries))
+
+    def test_blank_cells_never_match_each_other(self):
+        entries = parse_wallet_entries([["h"] * 6, form_row("", FIRST)])
+        self.assertEqual(entries, set())
+        self.assertFalse(has_filled({"key_b": ""}, entries))
 
     def test_normalize_work_tg(self):
         n = normalize_work_tg
@@ -83,17 +89,27 @@ class PlanTests(unittest.TestCase):
         roster = [HEADER,
                   roster_row("DN1", "已填", TODAY_STR, "@filled01"),
                   roster_row("DN2", "没填", TODAY_STR, "@unfilled2"),
-                  roster_row("DN3", "没填没TG", TODAY_STR, "待补充"),
-                  roster_row("DN4", "重复TG", TODAY_STR, "@unfilled2"),
-                  roster_row("DN5", "昨天入职", "2020-01-01", "@old001")]
+                  roster_row("DN3", "类型不对", TODAY_STR, "@wrongtype"),
+                  roster_row("DN4", "没填没TG", TODAY_STR, "待补充"),
+                  roster_row("DN5", "重复TG", TODAY_STR, "@unfilled2"),
+                  roster_row("", "B列空", TODAY_STR, "@blankb01"),
+                  roster_row("DN6", "昨天入职", "2020-01-01", "@old001")]
         wallet = [["h"] * 6,
-                  form_row("DN1", "已填", FIRST),
-                  form_row("DN2", "没填", "变更地址")]     # 类型不对不算填写
+                  form_row("DN1", FIRST),
+                  form_row("DN3", "变更地址"),                  # 类型不对不算填写
+                  form_row("DN2", FIRST, c="没填")]              # 注意：这行D列=DN2，所以DN2算已填写
         plan = plan_wallet_reminders(roster, wallet, TODAY)
-        self.assertEqual(len(plan["hired"]), 4)
-        self.assertEqual([p["key_c"] for p in plan["filled"]], ["已填"])
-        self.assertEqual([(p["key_c"], p["tg"]) for p in plan["to_remind"]], [("没填", "@unfilled2")])
-        self.assertEqual([person_label(p) for p in plan["no_tg"]], ["没填没TG"])
+        self.assertEqual(len(plan["hired"]), 6)
+        self.assertEqual([p["key_b"] for p in plan["filled"]], ["DN1", "DN2"])
+        self.assertEqual([(p["key_b"], p["tg"]) for p in plan["to_remind"]],
+                         [("DN3", "@wrongtype"), ("DN5", "@unfilled2")])    # DN5的TG不被已填写的DN2占用
+        self.assertEqual([p["key_b"] for p in plan["no_tg"]], ["DN4"])
+        self.assertEqual([p["name_c"] for p in plan["unverifiable"]], ["B列空"])
+
+    def test_same_tg_reminded_once(self):
+        roster = [HEADER, roster_row("A1", "甲", TODAY_STR, "@sametg1"), roster_row("A2", "乙", TODAY_STR, "@sametg1")]
+        plan = plan_wallet_reminders(roster, [["h"] * 6], TODAY)
+        self.assertEqual([p["key_b"] for p in plan["to_remind"]], ["A1"])
 
     def test_message_text(self):
         self.assertEqual(WALLET_REMINDER_MESSAGE,
@@ -142,7 +158,7 @@ ROSTER = [HEADER,
           roster_row("DN2", "没填甲", TODAY_STR, "@unfilled2"),
           roster_row("DN3", "没填乙", TODAY_STR, "https://t.me/unfilled3"),
           roster_row("DN4", "没TG", TODAY_STR, "")]
-WALLET = [["h"] * 6, form_row("DN1", "已填", FIRST)]
+WALLET = [["h"] * 6, form_row("DN1", FIRST)]
 
 
 class HandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -199,13 +215,24 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_filled_or_nobody_today(self):
         ns["wallet_form_repo"].load_rows.return_value = [["h"] * 6] + [
-            form_row(f"DN{i}", n, FIRST) for i, n in ((1, "已填"), (2, "没填甲"), (3, "没填乙"), (4, "没TG"))]
+            form_row(f"DN{i}", FIRST) for i in (1, 2, 3, 4)]
         await ns["on_ssc_wallet_reminder_trigger"](self._event(msg_id=1))
         self.assertEqual(self._pending(), [])
         self.assertIn("都已填写", self._sent_texts()[-1])
         ns["training_sync_roster_repo"].load_rows.return_value = [HEADER]
         await ns["on_ssc_wallet_reminder_trigger"](self._event(msg_id=2))
         self.assertIn("没有入职的人", self._sent_texts()[-1])
+        ns["training_sync_roster_repo"].load_rows.return_value = ROSTER
+
+    async def test_person_with_blank_b_is_listed_for_manual_check_not_reminded(self):
+        ns["training_sync_roster_repo"].load_rows.return_value = [
+            HEADER, roster_row("", "没有B列", TODAY_STR, "@blankb01")]
+        await ns["on_ssc_wallet_reminder_trigger"](self._event())
+        self.assertEqual(self._pending(), [])
+        summary = self._sent_texts()[-1]
+        self.assertIn("花名册B列为空", summary)
+        self.assertIn("没有B列", summary)
+        self.assertNotIn("都已填写", summary)
         ns["training_sync_roster_repo"].load_rows.return_value = ROSTER
 
     async def test_notices_never_contain_trigger_keyword(self):
