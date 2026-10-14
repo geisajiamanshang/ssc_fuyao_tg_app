@@ -131,12 +131,19 @@ SSC Offer 审批流转自动化 主程序。
              逐个私发给他的工作TG（花名册AE列），间隔随机5-10秒，发送成功即删草稿；
              只在生产环境启用（会私发真人，且关键词不分环境）
 
+  场景十六：SSC在自己的收藏夹收到"培训通知"关键词
+          -> 花名册（机器人）G列入职日期是今天的人，每人一条学习群链接草稿
+             （"https://t.me/+gL8gzMBNRNZlYWVl\n\n进群自学pdf 和 视频 并参加考试哦"）发到收藏夹，
+             经审批码18（测试18）一次性放行：逐个私发到他的私人TG（AF列），间隔随机5-10秒，
+             发送成功即删草稿；只在生产环境启用。场景十三的触发词"培训"包含在"培训通知"里，
+             所以场景十三遇到"培训通知"会让开；本场景发到收藏夹的提示也不含"培训"二字
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92/测试111/测试13/测试14/测试15/测试17”，
-     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92/111/13/14/15/17”。
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试5/测试9/测试91/测试92/测试111/测试13/测试14/测试15/测试17/测试18”，
+     生产审批使用“1/2/3/11/21/6/6.1/6.2/7/5/9/91/92/111/13/14/15/17/18”。
 """
 
 import asyncio
@@ -240,6 +247,11 @@ from wallet_reminder import (
     plan_wallet_reminders,
     person_label,
 )
+from training_notice import (
+    TRAINING_NOTICE_MESSAGE,
+    plan_training_notices,
+    person_label as training_notice_person_label,
+)
 from training_sync import (
     TRAINING_SYNC_HEADER,
     TrainingSyncRosterRepository,
@@ -314,6 +326,8 @@ wallet_sync_events = StateStore(config.DB_PATH + ".wallet_sync.json")
 wallet_sync_lock = asyncio.Lock()
 wallet_reminder_events = StateStore(config.WALLET_REMINDER_STATE_PATH)
 wallet_reminder_lock = asyncio.Lock()
+training_notice_events = StateStore(config.TRAINING_NOTICE_STATE_PATH)
+training_notice_lock = asyncio.Lock()
 wallet_form_repo = TrainingSyncRosterRepository(
     config.WALLET_REMINDER_FORM_SPREADSHEET_ID, config.WALLET_REMINDER_FORM_SHEET_GID, label="钱包表单",
 )
@@ -3082,6 +3096,9 @@ async def on_ssc_training_sync_trigger(event):
         return
     if config.TRAINING_SYNC_TRIGGER_KEYWORD not in text:
         return
+    # "培训通知"是场景十六的触发词，里面含"培训"，这里让开，免得两个流程同时被触发。
+    if config.TRAINING_NOTICE_TRIGGER_KEYWORD in text:
+        return
     reviewer = await get_ssc_reviewer()
     if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
         return
@@ -3441,6 +3458,151 @@ async def on_ssc_wallet_reminder_release(event):
                 log.exception("[场景15] 私发提醒给%s失败，草稿msg_id=%s", item["destination"], item["draft_id"])
                 await client.send_message(
                     reviewer.id, f"私发提醒给{item['destination']}失败：{str(exc)[:150]}（不会自动重发）",
+                    parse_mode=None,
+                )
+        if index < len(pending) - 1:
+            await asyncio.sleep(random.uniform(5, 10))
+
+
+# ==================== 场景十六：培训通知 ====================
+def _no_training_word(text, keyword):
+    """场景十三的触发词是"培训"：本场景发到收藏夹的提示里不能出现这两个字，否则会
+    触发场景十三（也不能带完整的"培训通知"触发自己）。"""
+    return (text or "").replace(keyword, "").replace("培训", "")
+
+
+@client.on(events.NewMessage())
+async def on_ssc_training_notice_trigger(event):
+    """SSC收藏夹收到带"培训通知"关键词的消息：花名册（机器人）G列入职日期是今天的人，
+    每人一条"学习群链接"草稿进收藏夹，等审批码18统一放行后逐个私发到他的私人TG
+    （AF列）。收藏夹里机器人自己发的提示经_no_training_word去掉了触发词，
+    草稿文案里本来就没有。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    if config.TRAINING_NOTICE_TRIGGER_KEYWORD not in text:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id:
+        return
+
+    async def notify(message):
+        await client.send_message(
+            reviewer.id,
+            _no_training_word(message, config.TRAINING_NOTICE_TRIGGER_KEYWORD),
+            parse_mode=None,
+        )
+
+    if not config.TRAINING_NOTICE_ENABLED:
+        await notify("该流程未启用：花名册（机器人）表格ID需要配置好，且只在生产环境生效。")
+        return
+    key = f"{event.chat_id}:{event.message.id}"
+    async with training_notice_lock:
+        if training_notice_events.get(key):
+            return
+        training_notice_events.set(key, {"status": "processing"})
+    try:
+        today = datetime.now(ZoneInfo(config.DAILY_REPORT_TIMEZONE)).date()
+        rows = await asyncio.to_thread(training_sync_roster_repo.load_rows)
+        plan = plan_training_notices(rows, today)
+        if not plan["hired"]:
+            training_notice_events.update(key, status="nobody_today")
+            await notify(f"花名册里今天（{today.isoformat()}）没有入职的人（G列），不需要发送。")
+            return
+        queued, skipped = [], []
+        for person in plan["to_send"]:
+            candidate = f"training_notice:{today.isoformat()}:{person['tg'].casefold()}"
+            if (state.get(candidate) or {}).get("stage") == "training_notice_sent":
+                skipped.append(f"{training_notice_person_label(person)}（今天已发送过）")
+                continue
+            if any(i.get("candidate") == candidate and i.get("status") == "pending"
+                   for i in outbox.all().values()):
+                skipped.append(f"{training_notice_person_label(person)}（已有待发送草稿）")
+                continue
+            async with ssc_send_lock:
+                draft = await client.send_message(reviewer.id, TRAINING_NOTICE_MESSAGE, parse_mode=None)
+                outbox.set(str(draft.id), {
+                    "draft_id": draft.id, "destination": person["tg"], "reply_to": None,
+                    "candidate": candidate, "expected_stage": "waiting_training_notice_approval",
+                    "updates": {"stage": "training_notice_sent"}, "id_field": None,
+                    "kind": "training_notice", "status": "pending",
+                    "review_chat_id": reviewer.id,
+                    "approval_code": str(config.TRAINING_NOTICE_APPROVAL_CODE),
+                    "delete_draft_after_send": True,
+                })
+                state.update(candidate, stage="waiting_training_notice_approval")
+            queued.append(f"{training_notice_person_label(person)} → {person['tg']}")
+        summary = [f"今日（{today.isoformat()}）入职{len(plan['hired'])}人。"]
+        if queued:
+            summary.append(
+                f"已生成{len(queued)}条学习群链接草稿，确认无误后发送 {config.TRAINING_NOTICE_APPROVAL_CODE} 放行：\n"
+                + "\n".join(queued)
+            )
+        if skipped:
+            summary.append("跳过：\n" + "\n".join(skipped))
+        if plan["no_tg"]:
+            summary.append("私人TG（AF列）为空或认不出来，请人工发送：\n"
+                           + "\n".join(training_notice_person_label(p) for p in plan["no_tg"]))
+        training_notice_events.update(
+            key, status="queued", hired=len(plan["hired"]), queued=len(queued), no_tg=len(plan["no_tg"]),
+        )
+        await notify("\n".join(summary))
+    except Exception as exc:
+        training_notice_events.update(key, status="failed")
+        log.exception("[场景16] 处理msg_id=%s失败", event.message.id)
+        await notify("该流程生成失败，请查看机器人日志。错误：" + str(exc)[:200])
+
+
+@client.on(events.NewMessage())
+async def on_ssc_training_notice_release(event):
+    """SSC在自己的收藏夹发送TRAINING_NOTICE_APPROVAL_CODE（18/测试18），一次性放行
+    本轮全部待私发的学习群链接草稿：逐个私发，间隔随机5-10秒，每条发送成功立即
+    删除对应草稿；发送失败的标failed并告诉SSC是谁，不自动重发（避免重复打扰）。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    if (event.raw_text or "").strip() != config.TRAINING_NOTICE_APPROVAL_CODE:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.TRAINING_NOTICE_ENABLED:
+        return
+    pending = sorted(
+        (i for i in outbox.all().values()
+         if i.get("kind") == "training_notice" and i.get("status") == "pending"
+         and i.get("review_chat_id") == reviewer.id),
+        key=lambda i: i["draft_id"],
+    )
+    for index, item in enumerate(pending):
+        key = str(item["draft_id"])
+        current = outbox.all().get(key)
+        if not current or current.get("status") != "pending":
+            continue
+        async with ssc_send_lock:
+            try:
+                draft = await client.get_messages(reviewer.id, ids=item["draft_id"])
+                if not draft or not draft.raw_text:
+                    outbox.update(key, status="failed")
+                    await client.send_message(
+                        reviewer.id, f"{item['destination']} 的草稿已不存在，未发送。", parse_mode=None,
+                    )
+                    continue
+                outbox.update(key, status="sending", approval_msg_id=event.message.id)
+                recipient = await client.get_entity(item["destination"])
+                sent = await client.send_message(recipient, draft.raw_text, parse_mode=None)
+                state.update(item["candidate"], **item["updates"])
+                outbox.update(key, status="sent", sent_msg_id=sent.id)
+                log.info("[场景16] 已私发给%s msg_id=%s（%s/%s）",
+                         item["destination"], sent.id, index + 1, len(pending))
+                try:
+                    await client.delete_messages(reviewer.id, [item["draft_id"]])
+                except Exception:
+                    log.exception("[场景16] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
+            except Exception as exc:
+                outbox.update(key, status="failed")
+                log.exception("[场景16] 私发给%s失败，草稿msg_id=%s", item["destination"], item["draft_id"])
+                await client.send_message(
+                    reviewer.id, f"私发给{item['destination']}失败：{_no_training_word(str(exc)[:150], '')}（不会自动重发）",
                     parse_mode=None,
                 )
         if index < len(pending) - 1:

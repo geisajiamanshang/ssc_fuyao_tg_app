@@ -247,6 +247,12 @@ ONBOARDING_AGREEMENT_LEADER_TG = os.environ.get("ONBOARDING_AGREEMENT_LEADER_TG"
 # 向工作TG（花名册AE列）发提醒；草稿先进收藏夹，审批码17放行。两张表都要分享给
 # 机器人的Google服务账号。
 WALLET_REMINDER_TRIGGER_KEYWORD = "钱包提醒"
+
+# 场景十六：SSC收藏夹出现"培训通知"关键词后，给花名册（机器人）G列入职日期是今天的人，
+# 向私人TG（AF列）私发学习群链接；草稿先进收藏夹，审批码18放行。注意：这个词里含"培训"，
+# 场景十三的触发词也是"培训"，所以场景十三遇到"培训通知"会主动让开，本场景的所有提示
+# 文案也不能出现"培训"两个字，否则会反过来触发场景十三。
+TRAINING_NOTICE_TRIGGER_KEYWORD = "培训通知"
 WALLET_REMINDER_FORM_SPREADSHEET_ID = os.environ.get(
     "WALLET_REMINDER_FORM_SPREADSHEET_ID", "1SrvH7LuKqlekXzUUxbMAY3VNT54ApXNqG6bki9bnhXQ"
 )
