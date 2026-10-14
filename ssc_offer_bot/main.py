@@ -2997,13 +2997,40 @@ def strip_wallet_sync_notice_lines(text):
     return "\n".join(lines).rstrip()
 
 
+def usable_media(message):
+    """消息里能原样重发的图片/文件；网页链接预览不算附件。"""
+    media = getattr(message, "media", None)
+    if media is None or type(media).__name__ == "MessageMediaWebPage":
+        return None
+    return media
+
+
+async def pick_wallet_sync_media(confirmation, draft_message):
+    """钱包地址同步要一起转发的图片（收款二维码等）：优先用@ling2089那条确认消息自己带的，
+    没有就取它回复/转发的那条消息带的，最后才用HR草稿消息自己带的。"""
+    media = usable_media(confirmation)
+    if media is not None:
+        return media
+    getter = getattr(confirmation, "get_reply_message", None)
+    if getter is not None:
+        try:
+            media = usable_media(await getter())
+        except Exception:
+            log.exception("[场景12] 读取被回复的消息失败，忽略其中的图片")
+            media = None
+        if media is not None:
+            return media
+    return usable_media(draft_message)
+
+
 @client.on(events.NewMessage(chats=config.GROUP_HRBP))
 async def on_wallet_sync_confirmation(event):
     """场景十二：恒睿SSC/HRBP-沟通群（跟场景一HRBP发Offer消息是同一个群，
     GROUP_HRBP）里，@ling2089核对完员工本人的钱包收款地址后，转发/回复
     一条带"钱包收款地址"关键词的确认消息——按这条消息里的"花名"，到同一个
     群更早的消息里找HR人工发的【新入职员工钱包地址信息同步】草稿，去掉
-    草稿结尾"@ling2089 请核对/@xxx 请知悉"这两行通知，发到SSC收藏夹，经
+    草稿结尾"@ling2089 请核对/@xxx 请知悉"这两行通知，连同确认消息里的图片
+    （收款二维码等，见pick_wallet_sync_media）一起发到SSC收藏夹，经
     审批码WALLET_SYNC_APPROVAL_CODE（测试13/13）放行到恒睿公司-联合管理
     工作群——复用queue_group_message统一的收藏夹审批放行机制，不单独写
     转发代码。
@@ -3055,14 +3082,17 @@ async def on_wallet_sync_confirmation(event):
             wallet_sync_events.update(event_key, status="no_draft_found")
             return
         draft_text = strip_wallet_sync_notice_lines(draft_message.raw_text or "")
+        media = await pick_wallet_sync_media(event.message, draft_message)
         await queue_group_message(
             config.GROUP_LEADERSHIP, draft_text,
             candidate=f"wallet_sync:{candidate_name}:{draft_message.id}",
             expected_stage="waiting_wallet_sync_approval",
             updates={"stage": "wallet_sync_sent"},
             kind="message", approval_code=config.WALLET_SYNC_APPROVAL_CODE,
+            file=media,
         )
-        wallet_sync_events.update(event_key, status="queued", draft_msg_id=draft_message.id)
+        wallet_sync_events.update(event_key, status="queued", draft_msg_id=draft_message.id,
+                                  with_media=media is not None)
         log.info(
             "[场景12] %s 钱包地址核对确认已收到，草稿(msg_id=%s)已发送SSC收藏夹，等待发送%s放行",
             candidate_name, draft_message.id, config.WALLET_SYNC_APPROVAL_CODE,

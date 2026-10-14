@@ -22,6 +22,7 @@ tree = ast.parse(source)
 selected = {
     '_core_name', '_normalized_name', 'matches_wallet_sync_draft',
     'strip_wallet_sync_notice_lines', 'on_wallet_sync_confirmation',
+    'usable_media', 'pick_wallet_sync_media',
 }
 config = NS(
     GROUP_HRBP=-100, GROUP_LEADERSHIP=-200, EXCLUDED_CHAT_IDS=frozenset(),
@@ -165,6 +166,47 @@ class WalletSyncConfirmationHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.args[1], EXPECTED_FINAL_TEXT)
         self.assertEqual(call.kwargs['approval_code'], '13')
         ns['client'].send_message.assert_not_awaited()
+
+    def _event_with(self, media=None, reply=None):
+        event = self._confirmation_event()
+        event.message = NS(id=80, media=media,
+                           get_reply_message=AsyncMock(return_value=reply))
+        return event
+
+    async def test_confirmation_image_is_forwarded_with_the_draft(self):
+        qr = NS(kind='photo')
+        ns['client'].iter_messages = messages(NS(id=50, raw_text=DRAFT_TEXT, media=NS(kind='draft_photo')))
+        await ns['on_wallet_sync_confirmation'](self._event_with(media=qr))
+        self.assertIs(ns['queue_group_message'].call_args.kwargs['file'], qr)
+        self.assertEqual(ns['queue_group_message'].call_args.args[1], EXPECTED_FINAL_TEXT)
+
+    async def test_image_from_replied_message_used_when_confirmation_has_none(self):
+        qr = NS(kind='photo')
+        ns['client'].iter_messages = messages(NS(id=50, raw_text=DRAFT_TEXT))
+        await ns['on_wallet_sync_confirmation'](self._event_with(reply=NS(media=qr)))
+        self.assertIs(ns['queue_group_message'].call_args.kwargs['file'], qr)
+
+    async def test_draft_own_image_used_as_last_resort(self):
+        pic = NS(kind='draft_photo')
+        ns['client'].iter_messages = messages(NS(id=50, raw_text=DRAFT_TEXT, media=pic))
+        await ns['on_wallet_sync_confirmation'](self._event_with())
+        self.assertIs(ns['queue_group_message'].call_args.kwargs['file'], pic)
+
+    async def test_no_image_anywhere_or_only_link_preview_sends_text_only(self):
+        class MessageMediaWebPage:
+            pass
+        ns['client'].iter_messages = messages(NS(id=50, raw_text=DRAFT_TEXT))
+        await ns['on_wallet_sync_confirmation'](self._event_with(media=MessageMediaWebPage()))
+        self.assertIsNone(ns['queue_group_message'].call_args.kwargs['file'])
+
+    async def test_reading_replied_message_failure_does_not_block_forwarding(self):
+        event = self._confirmation_event()
+        event.message = NS(id=80, media=None,
+                           get_reply_message=AsyncMock(side_effect=RuntimeError('boom')))
+        ns['client'].iter_messages = messages(NS(id=50, raw_text=DRAFT_TEXT))
+        await ns['on_wallet_sync_confirmation'](event)
+        ns['queue_group_message'].assert_awaited_once()
+        self.assertIsNone(ns['queue_group_message'].call_args.kwargs['file'])
 
     async def test_draft_posted_after_confirmation_is_not_matched(self):
         # 草稿msg_id比确认消息还新，说明是巧合撞名的另一次同步，不该被当成
