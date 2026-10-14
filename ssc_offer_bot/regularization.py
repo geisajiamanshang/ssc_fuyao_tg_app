@@ -3,6 +3,7 @@
 
 import io
 import re
+import unicodedata
 
 from daily_reports import DRIVE_FILES_URL, _drive_session
 
@@ -221,6 +222,39 @@ def build_regularization_messages(monthly_text, trigger_text):
     return names, messages
 
 
+_FOLDER_MIME = "application/vnd.google-apps.folder"
+_GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
+_DOCX_SUFFIX = ".docx"
+
+
+def _compact_name(name):
+    return "".join(unicodedata.normalize("NFKC", name or "").split())
+
+
+def month_name_matches(name, day):
+    """文件夹/文件名里带有day所在的月份，写法不限：20261001_10月转正、2026年10月、
+    2026年-10月、2026-10、202610……（"10月"不会误匹配"110月"，"1月"不会误匹配"10月"）。"""
+    compact = _compact_name(name)
+    year, month = day.year, day.month
+    years = re.findall(r"(?<!\d)(20\d{2})", compact)
+    if years and str(year) not in years:
+        return False  # 名字里明确写了别的年份（2025年10月），不是今年这个月
+    if f"{year}{month:02d}" in compact:
+        return True
+    if re.search(rf"{year}[-./年]+0?{month}(?!\d)", compact):
+        return True
+    return bool(re.search(rf"(?<!\d)0?{month}月", compact))
+
+
+def _is_info_file(item):
+    """转正信息文件：名字含"转正信息"，格式可以是.txt、.docx或Google文档。"""
+    name = item.get("name", "")
+    if item.get("mimeType") == _FOLDER_MIME or "转正信息" not in name:
+        return False
+    return (name.lower().endswith((".txt", _DOCX_SUFFIX))
+            or item.get("mimeType") == _GOOGLE_DOC_MIME)
+
+
 class RegularizationDriveRepository:
     def __init__(self, output_folder_id):
         self.output_folder_id = output_folder_id
@@ -272,34 +306,49 @@ class RegularizationDriveRepository:
         return result
 
     def _resolve_month_files(self, session, auth_params, day):
+        """找当月转正文件夹并列出里面的文件。先按文件夹名找：名字里有当月（写法不限，
+        见month_name_matches），优先名字里也有"转正"的；找不到再看名字含"转正"的最近
+        几个文件夹（如"2026中秋国庆5人转正"这种不带月份的命名）和输出文件夹顶层，
+        里面有名字带当月的转正信息文件就用它。都没有就报错，并把机器人实际看到的
+        文件夹名列出来（看到0个通常是文件夹没分享给机器人的Google服务账号）。"""
         children = self._list_children(
             session, auth_params, self.output_folder_id
         )
-        folder_mime = "application/vnd.google-apps.folder"
-        month_tokens = (f"{day.year}{day.month:02d}", f"{day.month}月转正")
-        folders = [
-            item for item in children
-            if item.get("mimeType") == folder_mime
-            and "转正" in item.get("name", "")
-            and any(token in item.get("name", "") for token in month_tokens)
-        ]
-        if not folders:
-            raise FileNotFoundError(f"未找到 {day.year}年{day.month}月转正文件夹")
-        return self._list_children(session, auth_params, folders[0]["id"])
+        folders = [i for i in children if i.get("mimeType") == _FOLDER_MIME]
+        in_month = [f for f in folders if month_name_matches(f.get("name", ""), day)]
+        preferred = [f for f in in_month if "转正" in f.get("name", "")] or in_month
+        if preferred:
+            return self._list_children(session, auth_params, preferred[0]["id"])
+
+        top_files = [i for i in children if i.get("mimeType") != _FOLDER_MIME]
+        if any(_is_info_file(i) and month_name_matches(i.get("name", ""), day) for i in top_files):
+            return top_files
+        for folder in [f for f in folders if "转正" in f.get("name", "")][:5]:
+            files = self._list_children(session, auth_params, folder["id"])
+            if any(_is_info_file(i) and month_name_matches(i.get("name", ""), day) for i in files):
+                return files
+
+        seen = "、".join(f.get("name", "") for f in folders[:8]) or "无"
+        hint = "（看到0个通常是该文件夹没有分享给机器人的Google服务账号）" if not children else ""
+        raise FileNotFoundError(
+            f"未找到 {day.year}年{day.month}月转正文件夹。机器人在转正输出文件夹里看到"
+            f"{len(folders)}个文件夹：{seen}{hint}"
+        )
 
     def load_month(self, day):
         session, auth_params = _drive_session()
         files = self._resolve_month_files(session, auth_params, day)
-        folder_mime = "application/vnd.google-apps.folder"
-        candidates = [
-            item for item in files
-            if item.get("mimeType") != folder_mime
-            and item.get("name", "").lower().endswith(".txt")
-            and "转正信息" in item.get("name", "")
-        ]
+        candidates = [i for i in files if _is_info_file(i)]
         if not candidates:
-            raise FileNotFoundError("当月转正文件夹中未找到转正信息 TXT")
-        return self._download_text(session, auth_params, candidates[0]), candidates[0]
+            raise FileNotFoundError("当月转正文件夹中未找到转正信息文件（.txt/.docx/Google文档）")
+        # .txt优先（原有格式），其次Word/Google文档；同一格式里保持最近修改的在前。
+        candidates.sort(key=lambda i: 0 if i.get("name", "").lower().endswith(".txt") else 1)
+        chosen = candidates[0]
+        if chosen.get("name", "").lower().endswith(".txt"):
+            return self._download_text(session, auth_params, chosen), chosen
+        from onboarding_agreement import OnboardingAgreementRepository
+
+        return OnboardingAgreementRepository._download_text(session, auth_params, chosen), chosen
 
     def find_poster(self, day, name):
         session, auth_params = _drive_session()

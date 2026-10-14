@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 from regularization import (
     RegularizationDriveRepository,
+    month_name_matches,
     build_regularization_messages,
     names_from_trigger,
     split_sections,
@@ -157,3 +158,108 @@ class RepositoryTests(TestCase):
                 RegularizationDriveRepository("output").find_poster(
                     date(2026, 9, 21), "比尔"
                 )
+
+
+FOLDER = "application/vnd.google-apps.folder"
+OCT = date(2026, 10, 14)
+
+
+class MonthFolderMatchingTests(TestCase):
+    def test_month_name_variants_for_october(self):
+        for name in ("20261001_10月转正", "2026年10月转正", "2026年-10月", "2026年-10月转正", "2026-10",
+                     "202610", "2026.10月转正", "10月转正", "2026年10月5人转正", "2026年 10 月"):
+            self.assertTrue(month_name_matches(name, OCT), name)
+
+    def test_other_months_do_not_match(self):
+        for name in ("20260901_9月转正", "2026年9月转正", "2026年-11月", "2025年10月", "110月",
+                     "2026中秋国庆5人转正", "转正模版", "20250901_10月转正"):
+            self.assertFalse(month_name_matches(name, OCT), name)
+        self.assertFalse(month_name_matches("2026年10月转正", date(2026, 1, 5)))   # 1月 != 10月
+        self.assertTrue(month_name_matches("2026年1月转正", date(2026, 1, 5)))
+
+
+def _session(*payloads):
+    session = Mock()
+    session.get.side_effect = list(payloads)
+    return session
+
+
+class MonthFolderResolutionTests(TestCase):
+    def _load(self, session, day=OCT):
+        with patch("regularization._drive_session", return_value=(session, {})):
+            return RegularizationDriveRepository("output").load_month(day)
+
+    def test_folder_without_zhuanzheng_in_name_is_found(self):
+        # 用户新的月份文件夹命名习惯："2026年-10月"，名字里没有"转正"。
+        session = _session(
+            FakeResponse({"files": [{"id": "oct", "name": "2026年-10月", "mimeType": FOLDER}]}),
+            FakeResponse({"files": [{"id": "txt", "name": "2026年10月多人转正信息_20261014.txt", "mimeType": "text/plain"}]}),
+            FakeResponse(text=SAMPLE),
+        )
+        text, item = self._load(session)
+        self.assertEqual((text, item["id"]), (SAMPLE, "txt"))
+
+    def test_prefers_folder_with_zhuanzheng_over_plain_month_folder(self):
+        session = _session(
+            FakeResponse({"files": [
+                {"id": "plain", "name": "2026年10月", "mimeType": FOLDER},
+                {"id": "reg", "name": "2026年10月5人转正", "mimeType": FOLDER}]}),
+            FakeResponse({"files": [{"id": "txt", "name": "转正信息_20261014.txt", "mimeType": "text/plain"}]}),
+            FakeResponse(text=SAMPLE),
+        )
+        self._load(session)
+        self.assertEqual(session.get.call_args_list[1].args[0].rsplit("/", 1)[-1], "files")
+        self.assertIn("'reg' in parents", session.get.call_args_list[1].kwargs["params"]["q"])
+
+    def test_fallback_to_zhuanzheng_folder_whose_info_file_names_the_month(self):
+        session = _session(
+            FakeResponse({"files": [{"id": "holiday", "name": "2026中秋国庆5人转正", "mimeType": FOLDER}]}),
+            FakeResponse({"files": [{"id": "txt", "name": "2026年10月多人转正信息_20261001.txt", "mimeType": "text/plain"}]}),
+            FakeResponse({"files": [{"id": "txt", "name": "2026年10月多人转正信息_20261001.txt", "mimeType": "text/plain"}]}),
+            FakeResponse(text=SAMPLE),
+        )
+        text, item = self._load(session)
+        self.assertEqual(item["id"], "txt")
+
+    def test_not_found_error_lists_what_the_bot_saw(self):
+        session = _session(FakeResponse({"files": [
+            {"id": "sep", "name": "20260901_9月转正", "mimeType": FOLDER},
+            {"id": "x", "name": "2026中秋国庆5人转正", "mimeType": FOLDER}]}),
+            FakeResponse({"files": []}), FakeResponse({"files": []}), FakeResponse({"files": []}))
+        with self.assertRaises(FileNotFoundError) as ctx:
+            self._load(session)
+        message = str(ctx.exception)
+        self.assertIn("未找到 2026年10月转正文件夹", message)
+        self.assertIn("20260901_9月转正", message)
+        self.assertIn("看到2个文件夹", message)
+        self.assertLess(len(message), 300)
+
+    def test_nothing_visible_hints_at_sharing(self):
+        with self.assertRaises(FileNotFoundError) as ctx:
+            self._load(_session(FakeResponse({"files": []})))
+        self.assertIn("没有分享给机器人的Google服务账号", str(ctx.exception))
+
+    def test_docx_info_file_is_used_when_no_txt(self):
+        import io as _io
+        import zipfile as _zip
+
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        body = (f'<w:document xmlns:w="{w}"><w:body>'
+                + "".join(f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>" for line in SAMPLE.splitlines())
+                + "</w:body></w:document>")
+        buf = _io.BytesIO()
+        with _zip.ZipFile(buf, "w") as zf:
+            zf.writestr("word/document.xml", body)
+        class BytesResponse(FakeResponse):
+            content = buf.getvalue()
+
+        response = BytesResponse(text="")
+        session = _session(
+            FakeResponse({"files": [{"id": "oct", "name": "2026年-10月转正", "mimeType": FOLDER}]}),
+            FakeResponse({"files": [{"id": "doc", "name": "2026年10月多人转正信息_20261014.docx", "mimeType": "application/x"}]}),
+            response,
+        )
+        text, item = self._load(session)
+        self.assertEqual(item["id"], "doc")
+        self.assertIn("【转正信息同步】", text)
+        self.assertEqual(split_sections(text)["转正信息同步"].strip().splitlines()[0], "————")
