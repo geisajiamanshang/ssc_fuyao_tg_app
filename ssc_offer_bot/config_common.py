@@ -73,8 +73,12 @@ REGULARIZATION_TRIGGER_BOT_ID = int(
 )
 REGULARIZATION_TRIGGER_KEYWORD = "转正提醒-恒睿-转正倒数4天"
 REGULARIZATION_TODAY_TRIGGER_KEYWORD = "转正提醒-恒睿-今日转正"
+# 转正助手/输出：每个月的转正文件夹（转正信息、转正海报）都在这个文件夹里面，要分享给
+# 机器人的Google服务账号。服务器 .env.prod 里如果设置了 REGULARIZATION_OUTPUT_FOLDER_ID，
+# 会覆盖这里的默认值，换文件夹时记得一起改。
+# https://drive.google.com/drive/u/1/folders/1ow3D3vRgUSQ6PctbcoAmbdNkjzh3kF83
 REGULARIZATION_OUTPUT_FOLDER_ID = os.environ.get(
-    "REGULARIZATION_OUTPUT_FOLDER_ID", "17QEQ5Q1Nyfp1asMiXZYt-4vd4UDHVxAg"
+    "REGULARIZATION_OUTPUT_FOLDER_ID", "1ow3D3vRgUSQ6PctbcoAmbdNkjzh3kF83"
 )
 
 ANNIVERSARY_TRIGGER_BOT_ID = REGULARIZATION_TRIGGER_BOT_ID
