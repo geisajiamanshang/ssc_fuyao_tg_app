@@ -173,23 +173,24 @@ class WalletSyncConfirmationHandlerTests(unittest.IsolatedAsyncioTestCase):
                            get_reply_message=AsyncMock(return_value=reply))
         return event
 
-    async def test_confirmation_image_is_forwarded_with_the_draft(self):
-        qr = NS(kind='photo')
-        ns['client'].iter_messages = messages(NS(id=50, raw_text=DRAFT_TEXT, media=NS(kind='draft_photo')))
-        await ns['on_wallet_sync_confirmation'](self._event_with(media=qr))
+    async def test_draft_own_image_is_forwarded_even_if_confirmation_has_one(self):
+        # 真实情况：HR草稿是"二维码图片+文字说明"一条消息，转发的就是这张图。
+        qr = NS(kind='draft_photo')
+        ns['client'].iter_messages = messages(NS(id=50, raw_text=DRAFT_TEXT, media=qr))
+        await ns['on_wallet_sync_confirmation'](self._event_with(media=NS(kind='confirmation_photo')))
         self.assertIs(ns['queue_group_message'].call_args.kwargs['file'], qr)
         self.assertEqual(ns['queue_group_message'].call_args.args[1], EXPECTED_FINAL_TEXT)
 
-    async def test_image_from_replied_message_used_when_confirmation_has_none(self):
-        qr = NS(kind='photo')
+    async def test_confirmation_image_used_when_draft_has_none(self):
+        pic = NS(kind='confirmation_photo')
         ns['client'].iter_messages = messages(NS(id=50, raw_text=DRAFT_TEXT))
-        await ns['on_wallet_sync_confirmation'](self._event_with(reply=NS(media=qr)))
-        self.assertIs(ns['queue_group_message'].call_args.kwargs['file'], qr)
+        await ns['on_wallet_sync_confirmation'](self._event_with(media=pic))
+        self.assertIs(ns['queue_group_message'].call_args.kwargs['file'], pic)
 
-    async def test_draft_own_image_used_as_last_resort(self):
-        pic = NS(kind='draft_photo')
-        ns['client'].iter_messages = messages(NS(id=50, raw_text=DRAFT_TEXT, media=pic))
-        await ns['on_wallet_sync_confirmation'](self._event_with())
+    async def test_image_from_replied_message_is_last_fallback(self):
+        pic = NS(kind='replied_photo')
+        ns['client'].iter_messages = messages(NS(id=50, raw_text=DRAFT_TEXT))
+        await ns['on_wallet_sync_confirmation'](self._event_with(reply=NS(media=pic)))
         self.assertIs(ns['queue_group_message'].call_args.kwargs['file'], pic)
 
     async def test_no_image_anywhere_or_only_link_preview_sends_text_only(self):

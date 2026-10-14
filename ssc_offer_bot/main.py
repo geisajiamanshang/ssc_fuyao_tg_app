@@ -3006,21 +3006,22 @@ def usable_media(message):
 
 
 async def pick_wallet_sync_media(confirmation, draft_message):
-    """钱包地址同步要一起转发的图片（收款二维码等）：优先用@ling2089那条确认消息自己带的，
-    没有就取它回复/转发的那条消息带的，最后才用HR草稿消息自己带的。"""
+    """钱包地址同步要一起转发的图片（收款二维码）：HR发的草稿通常就是"图片+文字说明"
+    一条消息，所以优先用草稿消息自己带的图；没有就取@ling2089那条确认消息自己带的，
+    再没有才取确认消息回复/转发的那条消息带的。"""
+    media = usable_media(draft_message)
+    if media is not None:
+        return media
     media = usable_media(confirmation)
     if media is not None:
         return media
     getter = getattr(confirmation, "get_reply_message", None)
     if getter is not None:
         try:
-            media = usable_media(await getter())
+            return usable_media(await getter())
         except Exception:
             log.exception("[场景12] 读取被回复的消息失败，忽略其中的图片")
-            media = None
-        if media is not None:
-            return media
-    return usable_media(draft_message)
+    return None
 
 
 @client.on(events.NewMessage(chats=config.GROUP_HRBP))
@@ -3030,7 +3031,7 @@ async def on_wallet_sync_confirmation(event):
     一条带"钱包收款地址"关键词的确认消息——按这条消息里的"花名"，到同一个
     群更早的消息里找HR人工发的【新入职员工钱包地址信息同步】草稿，去掉
     草稿结尾"@ling2089 请核对/@xxx 请知悉"这两行通知，连同确认消息里的图片
-    （收款二维码等，见pick_wallet_sync_media）一起发到SSC收藏夹，经
+    （收款二维码，见pick_wallet_sync_media）一起发到SSC收藏夹，经
     审批码WALLET_SYNC_APPROVAL_CODE（测试13/13）放行到恒睿公司-联合管理
     工作群——复用queue_group_message统一的收藏夹审批放行机制，不单独写
     转发代码。
