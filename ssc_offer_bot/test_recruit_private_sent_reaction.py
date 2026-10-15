@@ -51,7 +51,7 @@ def build_env(**overrides):
         SendReactionRequest=_fake_send_reaction_request,
         RECRUIT_PRIVATE_SENT_ACK_EMOJIS=("👌", "❤️"),
         client=client,
-        config=NS(EXCLUDED_CHAT_IDS=frozenset()),
+        config=NS(EXCLUDED_CHAT_IDS=frozenset(), RECRUIT_GROUP_SENT_REACTION_ENABLED=True),
         log=NS(warning=lambda *a, **kw: None, exception=lambda *a, **kw: None),
     )
     env.update(overrides)
@@ -134,6 +134,14 @@ class RecruitPrivateSentReplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_excluded_chat_is_ignored(self):
         self.env['config'] = NS(EXCLUDED_CHAT_IDS=frozenset({-456}))
         await self._run(reply_event('入职信息已私发', chat_id=-456))
+        self.assertEqual(self.scheduled, [])
+
+    async def test_reaction_disabled_by_config_is_skipped(self):
+        # 2026-10起按要求暂停招聘群"私发"确认的自动点表情动作；其它判断
+        # （回复机器人通知、带"私发"关键词）仍然正常执行，只是不再点表情。
+        self.env['config'] = NS(EXCLUDED_CHAT_IDS=frozenset(),
+                                 RECRUIT_GROUP_SENT_REACTION_ENABLED=False)
+        await self._run(reply_event('入职信息已私发', chat_id=-456, msg_id=201))
         self.assertEqual(self.scheduled, [])
 
 

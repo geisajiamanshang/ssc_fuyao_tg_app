@@ -20,7 +20,8 @@ class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
         # 这两个字段；这里换一份本地的config，不去改共享的flow.config，
         # 避免影响其它引用flow.ns的测试文件。
         self.ns['config'] = NS(GROUP_LEADERSHIP=flow.config.GROUP_LEADERSHIP,
-                                GROUP_RECRUIT=-777, EXCLUDED_CHAT_IDS=frozenset())
+                                GROUP_RECRUIT=-777, EXCLUDED_CHAT_IDS=frozenset(),
+                                RECRUIT_PRIVATE_DM_REACTION_ENABLED=True)
         nodes = [copy.deepcopy(n) for n in flow.tree.body if isinstance(n, ast.AsyncFunctionDef)
                  and n.name in {'on_private_message','replay_pending_recruiter_dm',
                                  'retry_recruit_notifications','retry_onboarding_confirmations',
@@ -64,6 +65,19 @@ class RecruitIntakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs['expected_stage'],'waiting_ssc_onboarding')
         self.assertEqual(call.kwargs['reply_to'],10)
         self.ns['client'].send_message.assert_not_awaited()
+
+    async def test_reaction_disabled_by_config_does_not_schedule_reaction(self):
+        # 2026-10起按要求暂停招聘私聊候选人信息时的自动点表情动作；候选人
+        # 信息合并、生成入职确认草稿等其余处理不受影响。
+        self.ns['config'] = NS(GROUP_LEADERSHIP=flow.config.GROUP_LEADERSHIP,
+                                GROUP_RECRUIT=-777, EXCLUDED_CHAT_IDS=frozenset(),
+                                RECRUIT_PRIVATE_DM_REACTION_ENABLED=False)
+        self.ns['_send_delayed_reaction'] = AsyncMock()
+        await self.ns['on_private_message'](self.event)
+        self.ns['_send_delayed_reaction'].assert_not_called()
+        # 其余处理仍然照常进行。
+        call = self.ns['queue_group_message'].call_args
+        self.assertIn('效能中心【入职信息确认】', call.args[1])
 
     async def test_swapped_date_and_contact_in_dm_are_corrected(self):
         text = ('3️⃣招聘信息\n招聘渠道：万天招聘部\n简历来源：齐夏\n招聘通道：个人资源\n'

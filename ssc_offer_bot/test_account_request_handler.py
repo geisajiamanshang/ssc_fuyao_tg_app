@@ -49,6 +49,7 @@ def base_config(**overrides):
     fields = dict(
         EXCLUDED_CHAT_IDS=frozenset(),
         ACCOUNT_REQUEST_ENABLED=True,
+        ACCOUNT_REQUEST_AUTO_RESPOND_ENABLED=True,
         ACCOUNT_REQUEST_MANAGER_USERNAME='huakaifuguiyes',
         GROUP_LEADERSHIP=-1,
         GROUP_ACCOUNT_REQUEST_FOREIGN=-5414021470,
@@ -225,6 +226,17 @@ class AccountRequestHandlerTests(IsolatedAsyncioTestCase):
     async def test_disabled_when_not_enabled(self):
         forward = NS(sender=NS(first_name='里昂-HRGS-CN'), from_name=None)
         env = build_env(config=base_config(ACCOUNT_REQUEST_ENABLED=False))
+        await env['on_account_request_trigger'](
+            dm_event('哥 我这边要申请一个外事号', forward=forward)
+        )
+        self.assertEqual(env['_sent'], [])
+
+    async def test_disabled_when_auto_respond_disabled(self):
+        # 2026-10起按要求暂停对洛羽-SSC主管本人消息的自动响应：即使关键词和
+        # 发送者都匹配，只要 ACCOUNT_REQUEST_AUTO_RESPOND_ENABLED 关闭，就
+        # 不回"ok"、也不生成账号申请草稿。
+        forward = NS(sender=NS(first_name='里昂-HRGS-CN'), from_name=None)
+        env = build_env(config=base_config(ACCOUNT_REQUEST_AUTO_RESPOND_ENABLED=False))
         await env['on_account_request_trigger'](
             dm_event('哥 我这边要申请一个外事号', forward=forward)
         )
