@@ -102,6 +102,17 @@ ALL_STAFF_NOTICE_TRIGGER_KEYWORD = "全员群"
 # 洛羽-SSC主管-CN私聊里出现账号申请类关键词后自动生成申请草稿；按用户名
 # 匹配（比显示名稳定，改昵称不受影响）。
 ACCOUNT_REQUEST_MANAGER_USERNAME = "huakaifuguiyes"
+# 2026-10起按要求暂停对该账号本人消息的自动响应（自动回"ok"+生成账号
+# 申请草稿），功能代码整体保留，之后要恢复时把这里改回 True 即可，不用
+# 再改其它地方。
+ACCOUNT_REQUEST_AUTO_RESPOND_ENABLED = False
+
+# 招聘群"私发"回复确认 / 招聘私聊候选人信息确认，原本会随机延迟10-30秒后
+# 给对方消息点👌或❤️表情，模拟SSC手动确认收到的节奏；2026-10起按要求
+# 暂停这两处自动点表情的动作，草稿生成、候选人信息合并等其余处理不受
+# 影响。需要恢复时把下面两个值分别改回 True 即可。
+RECRUIT_GROUP_SENT_REACTION_ENABLED = False
+RECRUIT_PRIVATE_DM_REACTION_ENABLED = False
 
 # 恒睿公司-联合管理群出现"劝退申请"/"离职申请"关键词后，按员工姓名在Drive
 # 云端 离职助手/输出 文件夹查找该员工的《XX_离职信息同步.txt》。文件夹ID

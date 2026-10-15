@@ -1715,14 +1715,17 @@ async def on_recruit_private_sent_reply(event):
     me = await client.get_me()
     if not replied or replied.sender_id != me.id:
         return
-    asyncio.create_task(_send_delayed_reaction(
-        event.chat_id, event.message.id, random.uniform(10, 30)
-    ))
+    if config.RECRUIT_GROUP_SENT_REACTION_ENABLED:
+        asyncio.create_task(_send_delayed_reaction(
+            event.chat_id, event.message.id, random.uniform(10, 30)
+        ))
 
 
 @client.on(events.NewMessage(incoming=True))
 async def on_account_request_trigger(event):
     if not config.ACCOUNT_REQUEST_ENABLED:
+        return
+    if not config.ACCOUNT_REQUEST_AUTO_RESPOND_ENABLED:
         return
     if not event.is_private:
         return
@@ -2810,9 +2813,10 @@ async def on_private_message(event):
     # 这就是招聘私聊我发候选人信息的那条消息本身；SSC平时会手动点个表情
     # 确认收到，这里自动化同样的确认动作，跟下面能不能顺利匹配到候选人、
     # 生成不生成入职确认草稿完全独立，不影响也不依赖后续处理结果。
-    asyncio.create_task(_send_delayed_reaction(
-        event.chat_id, event.message.id, random.uniform(10, 30)
-    ))
+    if config.RECRUIT_PRIVATE_DM_REACTION_ENABLED:
+        asyncio.create_task(_send_delayed_reaction(
+            event.chat_id, event.message.id, random.uniform(10, 30)
+        ))
 
     sender = await event.get_sender()
     sender_username = sender.username or ""
