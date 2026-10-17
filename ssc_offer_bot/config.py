@@ -41,9 +41,6 @@ ONBOARDING_TRAINING_WELCOME_APPROVAL_CODE = "测试6.2" if ENVIRONMENT == "test"
 # SSC3组内部工作沟通群/转正提醒来源群出现"全员群"关键词后，把紧邻的上一条
 # 图文通知转发到收藏夹，经这个审批码一次性广播到全部全员群。
 ALL_STAFF_NOTICE_APPROVAL_CODE = "测试7" if ENVIRONMENT == "test" else "7"
-# 洛羽-SSC主管-CN私聊里出现账号申请关键词后生成的【员工帐号申请】草稿，
-# 经这个审批码放行到外事/工作两个需求群之一（按关键词是否含"外事"判断）。
-ACCOUNT_REQUEST_APPROVAL_CODE = "测试5" if ENVIRONMENT == "test" else "5"
 # 恒睿公司-联合管理群出现"劝退申请"/"离职申请"后，离职信息按四段分别经
 # 各自审批码放行：81 离职确认转联合管理群；82 薪水结算信息私发员工本人
 # 工作TG；83 离职信息同步一次性转发人事数据同步-SSC3组+北斗离职人员-
@@ -104,7 +101,6 @@ APPROVAL_CODES = frozenset({
     ONBOARDING_TRAINING_SYNC_APPROVAL_CODE,
     ONBOARDING_TRAINING_WELCOME_APPROVAL_CODE,
     ALL_STAFF_NOTICE_APPROVAL_CODE,
-    ACCOUNT_REQUEST_APPROVAL_CODE,
     OFFBOARDING_FORWARD_APPROVAL_CODE,
     OFFBOARDING_SALARY_APPROVAL_CODE,
     OFFBOARDING_SYNC_APPROVAL_CODE,
@@ -126,8 +122,6 @@ ALL_STAFF_NOTICE_TRIGGER_CHAT_IDS = frozenset(
     {chat_id for chat_id in (GROUP_SSC3_INTERNAL_CHAT, GROUP_REGULARIZATION_TRIGGER) if chat_id}
 )
 ALL_STAFF_NOTICE_ENABLED = bool(ALL_STAFF_NOTICE_TRIGGER_CHAT_IDS)
-# 两个需求群的ID都配置好之前该功能自动跳过，不报错也不误发。
-ACCOUNT_REQUEST_ENABLED = bool(GROUP_ACCOUNT_REQUEST_FOREIGN) and bool(GROUP_ACCOUNT_REQUEST_WORK)
 # 花名册/花名册（机器人）两张表的ID、工作帐号需求群-SSC3组三者都配置好
 # 之前该功能自动跳过，不报错也不误发。
 ACCOUNT_APPLICATION_ENABLED = bool(
