@@ -264,6 +264,18 @@ WALLET_REMINDER_TRIGGER_KEYWORD = "钱包提醒"
 # 场景十三的触发词也是"培训"，所以场景十三遇到"培训通知"会主动让开，本场景的所有提示
 # 文案也不能出现"培训"两个字，否则会反过来触发场景十三。
 TRAINING_NOTICE_TRIGGER_KEYWORD = "培训通知"
+
+# 场景十七：SSC在自己的收藏夹发"拉人"（整条消息就是这两个字），读花名册，把M列（编制组织）
+# 是"技术中心"的人的工作TG（AE列）都拉进下面这个群，并把名单列出来。花名册：
+# https://docs.google.com/spreadsheets/d/1DgnePrJOwA0sa8v4wJbv3RjFmdXvhGVN9f1TrTuzJng/edit?gid=139264850
+# 群ID是普通群（basic group）的ID，写成负数（Telethon认-5517058150为普通群，不是超级群）。
+PULL_GROUP_TRIGGER = "拉人"
+PULL_GROUP_SPREADSHEET_ID = os.environ.get(
+    "PULL_GROUP_SPREADSHEET_ID", "1DgnePrJOwA0sa8v4wJbv3RjFmdXvhGVN9f1TrTuzJng"
+)
+PULL_GROUP_SHEET_GID = int(os.environ.get("PULL_GROUP_SHEET_GID", "139264850"))
+PULL_GROUP_CHAT_ID = int(os.environ.get("PULL_GROUP_CHAT_ID", "-5517058150"))
+PULL_GROUP_CENTER = os.environ.get("PULL_GROUP_CENTER", "技术中心")
 WALLET_REMINDER_FORM_SPREADSHEET_ID = os.environ.get(
     "WALLET_REMINDER_FORM_SPREADSHEET_ID", "1SrvH7LuKqlekXzUUxbMAY3VNT54ApXNqG6bki9bnhXQ"
 )

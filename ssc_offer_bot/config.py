@@ -168,6 +168,9 @@ WALLET_REMINDER_STATE_PATH = DB_PATH + ".wallet_reminder.json"
 # 同样不分环境触发、会私发真人，只在生产环境启用。
 TRAINING_NOTICE_ENABLED = ENVIRONMENT == "prod" and bool(TRAINING_SYNC_ROSTER_SPREADSHEET_ID)
 TRAINING_NOTICE_STATE_PATH = DB_PATH + ".training_notice.json"
+# 拉人会把真人加进群，触发词不分环境，所以只在生产环境启用。
+PULL_GROUP_ENABLED = ENVIRONMENT == "prod" and bool(PULL_GROUP_SPREADSHEET_ID and PULL_GROUP_CHAT_ID)
+PULL_GROUP_STATE_PATH = DB_PATH + ".pull_group.json"
 # 复用 GROUP_REGULARIZATION_SYNC 作为数据来源和无详情版目标群，该群ID配置好
 # 之前自动跳过，不报错。
 DAILY_SYNC_ENABLED = bool(GROUP_REGULARIZATION_SYNC)

@@ -138,6 +138,12 @@ SSC Offer 审批流转自动化 主程序。
              发送成功即删草稿；只在生产环境启用。场景十三的触发词"培训"包含在"培训通知"里，
              所以场景十三遇到"培训通知"会让开；本场景发到收藏夹的提示也不含"培训"二字
 
+  场景十七：SSC在自己的收藏夹发"拉人"（整条消息就是这两个字）
+          -> 读花名册，M列（编制组织）含"技术中心"的人，把AE列工作TG逐个拉进群
+             -5517058150（间隔随机5-10秒），先把名单按"花名 工作tg"列到收藏夹，拉完汇报
+             成功/本来就在群里/失败；表头核对不上（M列不是编制组织、AE列不是工作TG）
+             就一个都不拉；遇到限流立刻停手；只在生产环境启用
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
@@ -157,9 +163,12 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from telethon import TelegramClient, events, utils
+from telethon import TelegramClient, errors, events, utils
 from telethon.tl.types import UpdateMessageReactions, ReactionEmoji
 from telethon.tl.functions.messages import GetMessageReactionsListRequest, SendReactionRequest
+from telethon.tl.functions.messages import AddChatUserRequest
+from telethon.tl.functions.channels import InviteToChannelRequest
+from telethon.tl.types import Channel
 
 import config
 from state_store import StateStore
@@ -247,6 +256,12 @@ from wallet_reminder import (
     plan_wallet_reminders,
     person_label,
 )
+from group_pull import (
+    check_headers,
+    chunk_lines,
+    format_people,
+    plan_group_pull,
+)
 from training_notice import (
     TRAINING_NOTICE_MESSAGE,
     plan_training_notices,
@@ -328,6 +343,11 @@ wallet_reminder_events = StateStore(config.WALLET_REMINDER_STATE_PATH)
 wallet_reminder_lock = asyncio.Lock()
 training_notice_events = StateStore(config.TRAINING_NOTICE_STATE_PATH)
 training_notice_lock = asyncio.Lock()
+pull_group_events = StateStore(config.PULL_GROUP_STATE_PATH)
+pull_group_lock = asyncio.Lock()
+pull_group_roster_repo = TrainingSyncRosterRepository(
+    config.PULL_GROUP_SPREADSHEET_ID, config.PULL_GROUP_SHEET_GID, label="花名册",
+)
 wallet_form_repo = TrainingSyncRosterRepository(
     config.WALLET_REMINDER_FORM_SPREADSHEET_ID, config.WALLET_REMINDER_FORM_SHEET_GID, label="钱包表单",
 )
@@ -3642,6 +3662,105 @@ async def on_ssc_training_notice_release(event):
                 )
         if index < len(pending) - 1:
             await asyncio.sleep(random.uniform(5, 10))
+
+
+# ==================== 场景十七：拉人进群 ====================
+async def add_member_to_group(group, user):
+    """把一个用户加进群：超级群/频道用InviteToChannel，普通群用AddChatUser。"""
+    if isinstance(group, Channel):
+        await client(InviteToChannelRequest(group, [user]))
+    else:
+        await client(AddChatUserRequest(chat_id=group.id, user_id=user, fwd_limit=0))
+
+
+@client.on(events.NewMessage())
+async def on_ssc_pull_group_trigger(event):
+    """SSC在自己的收藏夹发"拉人"（整条消息就是这两个字，PULL_GROUP_TRIGGER）：读花名册，
+    M列（编制组织）是"技术中心"的人，把AE列工作TG逐个拉进PULL_GROUP_CHAT_ID群，先把名单
+    按"花名 工作tg"一行一个列到收藏夹，拉完再汇报：已拉进、本来就在群里、失败（含原因）。
+
+    拉的是真人，所以：表头核对不上（M列不是编制组织/AE列不是工作TG）就一个都不拉；
+    逐个间隔随机5-10秒；遇到限流（FloodWait/PeerFlood）立刻停手，把没拉的列出来，不自动重试；
+    单个失败不影响后面的人。整条消息必须恰好是"拉人"，收藏夹里机器人自己发的名单/汇报不会触发。
+    """
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    if (event.raw_text or "").strip() != config.PULL_GROUP_TRIGGER:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+
+    async def notify(message):
+        for chunk in chunk_lines(message):
+            await client.send_message(reviewer.id, chunk, parse_mode=None)
+
+    if not config.PULL_GROUP_ENABLED:
+        await notify("该流程未启用：只在生产环境生效，花名册表格ID和目标群需要配置好。")
+        return
+    key = f"{event.chat_id}:{event.message.id}"
+    async with pull_group_lock:
+        if pull_group_events.get(key):
+            return
+        pull_group_events.set(key, {"status": "processing"})
+    try:
+        rows = await asyncio.to_thread(pull_group_roster_repo.load_rows)
+        ok, problem = check_headers(rows)
+        if not ok:
+            pull_group_events.update(key, status="header_mismatch")
+            await notify("没有拉人。" + problem + "。请确认列位置后告诉我。")
+            return
+        plan = plan_group_pull(rows, config.PULL_GROUP_CENTER)
+        people = plan["people"]
+        if not people and not plan["no_tg"]:
+            pull_group_events.update(key, status="nobody")
+            await notify(f"花名册里没有M列是“{config.PULL_GROUP_CENTER}”的人，没有拉人。")
+            return
+        listing = f"{config.PULL_GROUP_CENTER}共{len(people)}人（花名 工作tg）：\n" + format_people(people)
+        if plan["no_tg"]:
+            listing += "\n\n工作TG（AE列）为空或认不出来，没法拉：\n" + "\n".join(
+                f"{p['name']} {p['raw'] or '（空）'}" for p in plan["no_tg"])
+        await notify(listing)
+        if not people:
+            pull_group_events.update(key, status="no_tg")
+            return
+        group = await client.get_entity(config.PULL_GROUP_CHAT_ID)
+        added, already, failed, stopped_at = [], [], [], None
+        for index, person in enumerate(people):
+            try:
+                user = await client.get_entity(person["tg"])
+                await add_member_to_group(group, user)
+                added.append(person)
+            except errors.UserAlreadyParticipantError:
+                already.append(person)
+            except (errors.FloodWaitError, errors.PeerFloodError) as exc:
+                failed.append((person, "被Telegram限流，已停止：" + type(exc).__name__))
+                stopped_at = index + 1
+                break
+            except Exception as exc:
+                log.exception("[场景17] 拉%s失败", person["tg"])
+                failed.append((person, (type(exc).__name__ + " " + str(exc)[:80]).replace("培训", "")))
+            if index < len(people) - 1:
+                await asyncio.sleep(random.uniform(5, 10))
+        pull_group_events.update(
+            key, status="done" if stopped_at is None else "stopped_by_limit",
+            added=len(added), already=len(already), failed=len(failed),
+        )
+        report = [f"拉人完成：成功{len(added)}人，本来就在群里{len(already)}人，失败{len(failed)}人。"]
+        if added:
+            report.append("已拉进：\n" + format_people(added))
+        if already:
+            report.append("本来就在群里：\n" + format_people(already))
+        if failed:
+            report.append("失败：\n" + "\n".join(f"{p['name']} {p['tg']}（{why}）" for p, why in failed))
+        if stopped_at is not None:
+            report.append("因限流停止，以下还没拉，过一阵再发“拉人”重试（已在群里的会自动跳过）：\n"
+                          + format_people(people[stopped_at:]))
+        await notify("\n\n".join(report))
+    except Exception as exc:
+        pull_group_events.update(key, status="failed")
+        log.exception("[场景17] 处理msg_id=%s失败", event.message.id)
+        await notify("该流程失败，请查看机器人日志。错误：" + str(exc)[:200].replace("培训", ""))
 
 
 @client.on(events.NewMessage())
