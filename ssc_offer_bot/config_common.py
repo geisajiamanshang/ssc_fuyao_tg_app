@@ -103,6 +103,9 @@ ALL_STAFF_NOTICE_TRIGGER_KEYWORD = "全员群"
 ALL_STAFF_NOTICE_TRIGGER_SENDER = os.environ.get(
     "ALL_STAFF_NOTICE_TRIGGER_SENDER", "xingchendahai990"
 ).strip().lstrip("@")
+# 这个群里要转发的通知可能在"全员群"那句话的上面，也可能是紧接着转发在它下面：取同一个
+# 发送者发的、时间上离触发消息最近的那一条（文字和图片一起）。要等下面那条的话，最多等这么多秒。
+ALL_STAFF_NOTICE_AFTER_WAIT_SECONDS = int(os.environ.get("ALL_STAFF_NOTICE_AFTER_WAIT_SECONDS", "60"))
 
 # 招聘群"私发"回复确认 / 招聘私聊候选人信息确认，原本会随机延迟10-30秒后
 # 给对方消息点👌或❤️表情，模拟SSC手动确认收到的节奏；2026-10起按要求

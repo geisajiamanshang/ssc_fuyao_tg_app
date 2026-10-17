@@ -58,7 +58,10 @@ SSC Offer 审批流转自动化 主程序。
              的最新内容，SSC可以在两次发送之间修改收藏夹草稿
           -> 第5个群发送成功后自动删除收藏夹里的这条草稿
           -> 生产环境里，转正提醒来源群（星辰小组工作对接群）只认@xingchendahai990发的
-             "全员群"关键词，别人说到不触发；SSC3组内部沟通群不限发送者
+             "全员群"关键词，别人说到不触发；要转发的通知取同一发送者发的、
+             离这条指令时间最近的一条（在上面或下面都行，文字图片一起转发，
+             纯文字也可以；下面那条最多等ALL_STAFF_NOTICE_AFTER_WAIT_SECONDS秒）。
+             SSC3组内部沟通群不限发送者，仍取指令之前最近一条图文通知
 
   场景九：SSC在自己的收藏夹发送"当日人事信息数据同步"触发码（测试9/9）
           -> 汇总"人事数据同步-SSC3组"里当天本账号发出的【入职信息同步】
@@ -1615,6 +1618,49 @@ async def on_onboarding_training_passed(event):
             )
 
 
+def _all_staff_candidate(message, sender_id):
+    """同一个发送者发的、有文字或图片、且不是"全员群"指令本身的消息才算候选通知。"""
+    if message is None or getattr(message, "sender_id", None) != sender_id:
+        return False
+    text = (message.raw_text or "").strip()
+    if config.ALL_STAFF_NOTICE_TRIGGER_KEYWORD in text:
+        return False
+    return bool(text) or usable_media(message) is not None
+
+
+async def find_all_staff_source_near(chat_id, trigger_message, sender_id):
+    """找"全员群"指令附近要转发的那条通知：同一个发送者、时间上离指令最近的一条，
+    在指令上面或下面都行（下面那条是指令之后才转发进来的，所以要等一会儿）。
+    返回消息或None。上面那条的时间差是tb秒时，下面的只有在tb秒内到达才可能更近，
+    所以最多等min(tb, ALL_STAFF_NOTICE_AFTER_WAIT_SECONDS)秒；上面没有候选就等满。"""
+    def gap(message):
+        return abs((message.date - trigger_message.date).total_seconds())
+
+    before = None
+    async for message in client.iter_messages(chat_id, limit=20, max_id=trigger_message.id):
+        if _all_staff_candidate(message, sender_id):
+            before = message
+            break
+    max_wait = config.ALL_STAFF_NOTICE_AFTER_WAIT_SECONDS
+    wait = max_wait if before is None else min(max_wait, gap(before))
+    waited = 0
+    while True:
+        after = None
+        async for message in client.iter_messages(
+            chat_id, limit=20, min_id=trigger_message.id, reverse=True
+        ):
+            if _all_staff_candidate(message, sender_id):
+                after = message
+                break
+        if after is not None and (before is None or gap(after) < gap(before)):
+            return after
+        if waited >= wait:
+            return before
+        step = min(2, wait - waited)
+        await asyncio.sleep(step)
+        waited += step
+
+
 @client.on(events.NewMessage())
 async def on_all_staff_notice_trigger(event):
     if not config.ALL_STAFF_NOTICE_ENABLED:
@@ -1628,11 +1674,13 @@ async def on_all_staff_notice_trigger(event):
     # 有些来源群只认指定账号发的关键词（ALL_STAFF_NOTICE_TRIGGER_SENDERS），其他人
     # 在群里说到"全员群"不触发。
     required_sender = config.ALL_STAFF_NOTICE_TRIGGER_SENDERS.get(event.chat_id)
+    sender_id = None
     if required_sender:
         sender = await event.get_sender()
         sender_username = (getattr(sender, "username", "") or "").strip().lstrip("@").casefold()
         if sender_username != required_sender.strip().lstrip("@").casefold():
             return
+        sender_id = getattr(sender, "id", None)
 
     log.info(
         "[全员群转发] 已捕捉触发消息：environment=%s chat_id=%s msg_id=%s",
@@ -1648,20 +1696,31 @@ async def on_all_staff_notice_trigger(event):
         reviewer = await get_ssc_reviewer()
         try:
             source_message = None
-            async for candidate_message in client.iter_messages(
-                event.chat_id, limit=20, max_id=event.message.id
-            ):
-                if candidate_message.id == event.message.id:
-                    continue
-                if candidate_message.media and (candidate_message.raw_text or "").strip():
-                    source_message = candidate_message
-                    break
-            if source_message is None:
-                raise RuntimeError("未在最近消息中找到需要转发到全员群的图文通知")
+            if required_sender:
+                # 指定发送者的群：取该发送者发的、离指令最近的一条（上面或下面），文字图片一起转发。
+                source_message = await find_all_staff_source_near(
+                    event.chat_id, event.message, sender_id)
+                if source_message is None:
+                    raise RuntimeError("未找到该发送者在“全员群”指令前后发的通知消息")
+                source_text = source_message.raw_text or ""
+                source_media = usable_media(source_message)
+            else:
+                async for candidate_message in client.iter_messages(
+                    event.chat_id, limit=20, max_id=event.message.id
+                ):
+                    if candidate_message.id == event.message.id:
+                        continue
+                    if candidate_message.media and (candidate_message.raw_text or "").strip():
+                        source_message = candidate_message
+                        break
+                if source_message is None:
+                    raise RuntimeError("未在最近消息中找到需要转发到全员群的图文通知")
+                source_text = source_message.raw_text
+                source_media = source_message.media
 
             candidate_key = f"all_staff_notice:{event_key}"
             draft = await queue_all_staff_broadcast(
-                candidate_key, source_message.raw_text, file=source_message.media
+                candidate_key, source_text, file=source_media
             )
             all_staff_notice_events.set(event_key, {
                 "status": "queued", "draft_id": draft.id,

@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest import IsolatedAsyncioTestCase
@@ -56,9 +57,11 @@ def base_config(**overrides):
 
 def build_env(history_messages=None, **overrides):
     source = ast.parse(Path(__file__).with_name('main.py').read_text())
-    functions = [n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
+    functions = [n for n in source.body if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
                  and n.name in {'on_all_staff_notice_trigger', 'get_ssc_reviewer',
-                                'queue_all_staff_broadcast', 'on_ssc_send_approval'}]
+                                'queue_all_staff_broadcast', 'on_ssc_send_approval',
+                                'find_all_staff_source_near', '_all_staff_candidate',
+                                'usable_media'}]
     for node in functions:
         node.decorator_list = []
 
@@ -72,8 +75,12 @@ def build_env(history_messages=None, **overrides):
     async def delete_messages(chat_id, ids):
         deleted.extend(ids)
 
-    async def history(*args, **kwargs):
-        for message in (history_messages or []):
+    async def history(chat_id, limit=None, max_id=0, min_id=0, reverse=False, **kwargs):
+        # 像Telethon一样：默认从新到旧，reverse从旧到新；min_id/max_id是开区间
+        messages = [m for m in list(history_messages or [])
+                    if (not max_id or m.id < max_id) and (not min_id or m.id > min_id)]
+        messages.sort(key=lambda m: m.id, reverse=not reverse)
+        for message in messages[:limit]:
             yield message
 
     me = NS(id=9, username='ffuuyao')
@@ -93,6 +100,7 @@ def build_env(history_messages=None, **overrides):
     )
     env.update(overrides)
     exec(compile(ast.Module(body=functions, type_ignores=[]), 'main.py', 'exec'), env)
+    env['_history'] = history_messages
     env['_sent'] = sent
     env['_deleted'] = deleted
     env['_client'] = client
@@ -113,29 +121,72 @@ def sender_event(username, msg_id=10, chat_id=-5000000002):
               get_sender=AsyncMock(return_value=NS(username=username)))
 
 
-class AllStaffNoticeSenderTests(IsolatedAsyncioTestCase):
-    """星辰小组工作对接群里只认@xingchendahai990发的"全员群"关键词。"""
+T0 = datetime(2026, 10, 17, 3, 0, 0, tzinfo=timezone.utc)
+OWNER_ID = 555
+PHOTO = NS(photo=True)
 
-    def _env(self):
-        poster = NS(id=9, raw_text='【欢迎新同事】图文海报正文', media=NS(photo=True))
-        return build_env(
-            history_messages=[poster],
-            config=base_config(ALL_STAFF_NOTICE_TRIGGER_SENDERS={-5000000002: 'xingchendahai990'}),
-        )
+
+def msg(msg_id, seconds, text='', media=None, sender_id=OWNER_ID):
+    return NS(id=msg_id, date=T0 + timedelta(seconds=seconds), raw_text=text,
+              media=media, sender_id=sender_id)
+
+
+def sender_event(username, msg_id=10, chat_id=-5000000002, seconds=100):
+    return NS(chat_id=chat_id, raw_text=TRIGGER_TEXT,
+              message=msg(msg_id, seconds, TRIGGER_TEXT),
+              get_sender=AsyncMock(return_value=NS(username=username, id=OWNER_ID)))
+
+
+class FakeAsyncio:
+    """不真的等待：每次sleep推进一个假时钟，并让到点的"迟到消息"出现在历史里。"""
+
+    def __init__(self, history, late=()):
+        self.history = history
+        self.late = list(late)  # [(第几秒出现, 消息)]
+        self.clock = 0
+        self.Lock = asyncio.Lock
+
+    async def sleep(self, seconds):
+        self.clock += seconds
+        for at, message in list(self.late):
+            if self.clock >= at:
+                self.history.append(message)
+                self.late.remove((at, message))
+
+
+RESTRICTED = {-5000000002: 'xingchendahai990'}
+
+
+def restricted_env(history, late=(), wait=60):
+    history = list(history)
+    fake = FakeAsyncio(history, late)
+    env = build_env(
+        history_messages=history,
+        config=base_config(ALL_STAFF_NOTICE_TRIGGER_SENDERS=RESTRICTED,
+                           ALL_STAFF_NOTICE_AFTER_WAIT_SECONDS=wait),
+        asyncio=fake,
+    )
+    env['_fake'] = fake
+    return env
+
+
+class AllStaffNoticeSenderTests(IsolatedAsyncioTestCase):
+    """星辰小组工作对接群里只认@xingchendahai990发的"全员群"关键词，
+    要转发的是该发送者发的、离指令最近的那条（上面或下面）。"""
 
     async def test_trigger_from_required_sender_queues_draft(self):
-        env = self._env()
+        env = restricted_env([msg(9, 95, '【欢迎新同事】图文海报正文', PHOTO)])
         await env['on_all_staff_notice_trigger'](sender_event('xingchendahai990'))
         self.assertEqual(len(env['_sent']), 1)
         self.assertEqual(env['all_staff_notice_events'].get('-5000000002:10')['status'], 'queued')
 
     async def test_sender_match_ignores_case_and_at_sign(self):
-        env = self._env()
+        env = restricted_env([msg(9, 95, '正文', PHOTO)])
         await env['on_all_staff_notice_trigger'](sender_event('XingChenDaHai990'))
         self.assertEqual(len(env['_sent']), 1)
 
     async def test_keyword_from_anyone_else_is_ignored(self):
-        env = self._env()
+        env = restricted_env([msg(9, 95, '正文', PHOTO)])
         for username in ('someone_else', '', None):
             await env['on_all_staff_notice_trigger'](sender_event(username))
         self.assertEqual(env['_sent'], [])
@@ -145,13 +196,80 @@ class AllStaffNoticeSenderTests(IsolatedAsyncioTestCase):
         poster = NS(id=9, raw_text='【欢迎新同事】图文海报正文', media=NS(photo=True))
         env = build_env(
             history_messages=[poster],
-            config=base_config(ALL_STAFF_NOTICE_TRIGGER_SENDERS={-5000000002: 'xingchendahai990'}),
+            config=base_config(ALL_STAFF_NOTICE_TRIGGER_SENDERS=RESTRICTED),
         )
         # -5339407017是另一个来源群（SSC3内部沟通群），不限发送者，也不会去取发送者
         event = NS(chat_id=-5339407017, raw_text=TRIGGER_TEXT, message=NS(id=10),
                    get_sender=AsyncMock(side_effect=AssertionError('不该查发送者')))
         await env['on_all_staff_notice_trigger'](event)
         self.assertEqual(len(env['_sent']), 1)
+
+    async def test_forwarded_notice_below_the_trigger_is_used_with_its_image(self):
+        # 截图1：指令上面是别的内容，下面紧跟着转发进来的"重要通知"（带图）
+        old = msg(5, 0, '很早以前的旧消息')
+        notice = msg(11, 103, '【重要通知】明天全员大会', PHOTO)
+        env = restricted_env([old, msg(10, 100, TRIGGER_TEXT), notice])
+        await env['on_all_staff_notice_trigger'](sender_event('xingchendahai990'))
+        destination, text, media = env['_sent'][0]
+        self.assertIn('【重要通知】明天全员大会', text)
+        self.assertIs(media, PHOTO)
+
+    async def test_text_only_notice_above_the_trigger_is_used(self):
+        # 截图2：上面是纯文字"9月薪资已发放完毕…"；下面是别的发送者（机器人）的消息
+        salary = msg(9, 97, '9月薪资已发放完毕，请大家查收', None)
+        bot_reply = msg(11, 101, '收到', None, sender_id=999)
+        env = restricted_env([salary, msg(10, 100, TRIGGER_TEXT), bot_reply], wait=6)
+        await env['on_all_staff_notice_trigger'](sender_event('xingchendahai990'))
+        destination, text, media = env['_sent'][0]
+        self.assertIn('9月薪资已发放完毕，请大家查收', text)
+        self.assertIsNone(media)
+
+    async def test_closer_one_wins_when_both_sides_exist(self):
+        before = msg(9, 50, '上面那条（隔了50秒）')
+        after = msg(11, 102, '下面那条（隔了2秒）')
+        env = restricted_env([before, msg(10, 100, TRIGGER_TEXT), after])
+        await env['on_all_staff_notice_trigger'](sender_event('xingchendahai990'))
+        self.assertIn('下面那条', env['_sent'][0][1])
+
+        before = msg(9, 98, '上面那条（隔了2秒）')
+        after = msg(11, 150, '下面那条（隔了50秒）')
+        env = restricted_env([before, msg(10, 100, TRIGGER_TEXT), after])
+        await env['on_all_staff_notice_trigger'](sender_event('xingchendahai990'))
+        self.assertIn('上面那条', env['_sent'][0][1])
+
+    async def test_notice_arriving_after_the_trigger_is_waited_for(self):
+        late = msg(11, 108, '【重要通知】迟到的通知', PHOTO)
+        env = restricted_env([msg(10, 100, TRIGGER_TEXT)], late=[(6, late)])
+        await env['on_all_staff_notice_trigger'](sender_event('xingchendahai990'))
+        self.assertIn('迟到的通知', env['_sent'][0][1])
+        self.assertLessEqual(env['_fake'].clock, 60)
+
+    async def test_far_above_message_does_not_make_us_wait_the_full_time(self):
+        # 上面那条只隔3秒：下面的只有3秒内到才更近，所以最多等3秒
+        env = restricted_env([msg(9, 97, '上面那条'), msg(10, 100, TRIGGER_TEXT)])
+        await env['on_all_staff_notice_trigger'](sender_event('xingchendahai990'))
+        self.assertIn('上面那条', env['_sent'][0][1])
+        self.assertLessEqual(env['_fake'].clock, 3)
+
+    async def test_other_senders_and_the_trigger_itself_are_never_picked(self):
+        env = restricted_env([
+            msg(9, 99, '别人发的', PHOTO, sender_id=999),
+            msg(10, 100, TRIGGER_TEXT),
+            msg(11, 101, '另一个全员群指令', None),
+        ], wait=4)
+        await env['on_all_staff_notice_trigger'](sender_event('xingchendahai990'))
+        # 只给收藏夹发一条失败提示，不生成转发草稿
+        self.assertEqual(len(env['_sent']), 1)
+        self.assertIn('转发失败', env['_sent'][0][1])
+        self.assertEqual(env['all_staff_notice_events'].get('-5000000002:10')['status'], 'failed')
+
+    async def test_empty_media_without_text_is_not_a_candidate(self):
+        webpage = msg(9, 99, '', NS(webpage=True))
+        env = restricted_env([webpage, msg(10, 100, TRIGGER_TEXT)], wait=2)
+        env['usable_media'] = lambda m: None
+        await env['on_all_staff_notice_trigger'](sender_event('xingchendahai990'))
+        self.assertEqual(len(env['_sent']), 1)
+        self.assertIn('转发失败', env['_sent'][0][1])
 
 
 class AllStaffNoticeTests(IsolatedAsyncioTestCase):
