@@ -43,6 +43,7 @@ def base_config(**overrides):
         ALL_STAFF_NOTICE_ENABLED=True,
         ALL_STAFF_NOTICE_TRIGGER_CHAT_IDS=frozenset({-5000000002, -5339407017}),
         ALL_STAFF_NOTICE_TRIGGER_KEYWORD='全员群',
+        ALL_STAFF_NOTICE_TRIGGER_SENDERS={},
         ANNIVERSARY_GROUP_RULES=GROUP_RULES,
         ALLOWED_DESTINATION_IDS={-101, -102, -103, -104, -105},
         ALL_STAFF_NOTICE_APPROVAL_CODE='测试7',
@@ -105,6 +106,52 @@ def trigger_event(msg_id=10, chat_id=-5000000002):
 def approve_event(code, approval_msg_id):
     return NS(chat_id=9, raw_text=code, is_private=True, sender_id=9,
               message=NS(id=approval_msg_id, reply_to_msg_id=None))
+
+
+def sender_event(username, msg_id=10, chat_id=-5000000002):
+    return NS(chat_id=chat_id, raw_text=TRIGGER_TEXT, message=NS(id=msg_id),
+              get_sender=AsyncMock(return_value=NS(username=username)))
+
+
+class AllStaffNoticeSenderTests(IsolatedAsyncioTestCase):
+    """星辰小组工作对接群里只认@xingchendahai990发的"全员群"关键词。"""
+
+    def _env(self):
+        poster = NS(id=9, raw_text='【欢迎新同事】图文海报正文', media=NS(photo=True))
+        return build_env(
+            history_messages=[poster],
+            config=base_config(ALL_STAFF_NOTICE_TRIGGER_SENDERS={-5000000002: 'xingchendahai990'}),
+        )
+
+    async def test_trigger_from_required_sender_queues_draft(self):
+        env = self._env()
+        await env['on_all_staff_notice_trigger'](sender_event('xingchendahai990'))
+        self.assertEqual(len(env['_sent']), 1)
+        self.assertEqual(env['all_staff_notice_events'].get('-5000000002:10')['status'], 'queued')
+
+    async def test_sender_match_ignores_case_and_at_sign(self):
+        env = self._env()
+        await env['on_all_staff_notice_trigger'](sender_event('XingChenDaHai990'))
+        self.assertEqual(len(env['_sent']), 1)
+
+    async def test_keyword_from_anyone_else_is_ignored(self):
+        env = self._env()
+        for username in ('someone_else', '', None):
+            await env['on_all_staff_notice_trigger'](sender_event(username))
+        self.assertEqual(env['_sent'], [])
+        self.assertIsNone(env['all_staff_notice_events'].get('-5000000002:10'))
+
+    async def test_other_trigger_chat_is_not_sender_restricted(self):
+        poster = NS(id=9, raw_text='【欢迎新同事】图文海报正文', media=NS(photo=True))
+        env = build_env(
+            history_messages=[poster],
+            config=base_config(ALL_STAFF_NOTICE_TRIGGER_SENDERS={-5000000002: 'xingchendahai990'}),
+        )
+        # -5339407017是另一个来源群（SSC3内部沟通群），不限发送者，也不会去取发送者
+        event = NS(chat_id=-5339407017, raw_text=TRIGGER_TEXT, message=NS(id=10),
+                   get_sender=AsyncMock(side_effect=AssertionError('不该查发送者')))
+        await env['on_all_staff_notice_trigger'](event)
+        self.assertEqual(len(env['_sent']), 1)
 
 
 class AllStaffNoticeTests(IsolatedAsyncioTestCase):

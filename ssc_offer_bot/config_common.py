@@ -98,6 +98,11 @@ ONBOARDING_TRAINING_OUTPUT_FOLDER_ID = os.environ.get(
 # SSC3组内部工作沟通群 / 转正提醒来源群里出现"全员群"关键词时，
 # 把紧邻的上一条图文通知转发到收藏夹，经审批码7一次性广播到全部全员群。
 ALL_STAFF_NOTICE_TRIGGER_KEYWORD = "全员群"
+# 转正提醒来源群（星辰小组工作对接群，GROUP_REGULARIZATION_TRIGGER）里，只认这个账号
+# 发的"全员群"关键词，别人说到这三个字不触发；SSC3组内部沟通群不受这条限制。只在生产环境生效。
+ALL_STAFF_NOTICE_TRIGGER_SENDER = os.environ.get(
+    "ALL_STAFF_NOTICE_TRIGGER_SENDER", "xingchendahai990"
+).strip().lstrip("@")
 
 # 招聘群"私发"回复确认 / 招聘私聊候选人信息确认，原本会随机延迟10-30秒后
 # 给对方消息点👌或❤️表情，模拟SSC手动确认收到的节奏；2026-10起按要求

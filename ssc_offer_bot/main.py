@@ -57,6 +57,8 @@ SSC Offer 审批流转自动化 主程序。
              需要连续发送5次才能覆盖全部5个全员群；发送时取的是当前草稿
              的最新内容，SSC可以在两次发送之间修改收藏夹草稿
           -> 第5个群发送成功后自动删除收藏夹里的这条草稿
+          -> 生产环境里，转正提醒来源群（星辰小组工作对接群）只认@xingchendahai990发的
+             "全员群"关键词，别人说到不触发；SSC3组内部沟通群不限发送者
 
   场景九：SSC在自己的收藏夹发送"当日人事信息数据同步"触发码（测试9/9）
           -> 汇总"人事数据同步-SSC3组"里当天本账号发出的【入职信息同步】
@@ -1623,6 +1625,14 @@ async def on_all_staff_notice_trigger(event):
     text = event.raw_text or ""
     if config.ALL_STAFF_NOTICE_TRIGGER_KEYWORD not in text:
         return
+    # 有些来源群只认指定账号发的关键词（ALL_STAFF_NOTICE_TRIGGER_SENDERS），其他人
+    # 在群里说到"全员群"不触发。
+    required_sender = config.ALL_STAFF_NOTICE_TRIGGER_SENDERS.get(event.chat_id)
+    if required_sender:
+        sender = await event.get_sender()
+        sender_username = (getattr(sender, "username", "") or "").strip().lstrip("@").casefold()
+        if sender_username != required_sender.strip().lstrip("@").casefold():
+            return
 
     log.info(
         "[全员群转发] 已捕捉触发消息：environment=%s chat_id=%s msg_id=%s",
