@@ -141,11 +141,21 @@ SSC Offer 审批流转自动化 主程序。
              成功/本来就在群里/失败；表头核对不上（M列不是编制组织、AE列不是工作TG）
              就一个都不拉；遇到限流立刻停手；只在生产环境启用
 
+  场景十八：SSC在自己的收藏夹发"通知uid"（不分大小写）
+          -> 机器人回一句请发人员名单；SSC在10分钟内再发一条名单（花名，一行一个或
+             空格/逗号隔开，也可以直接写@工作TG；发"取消"作废；"通知uid"后面直接带
+             名单就不用再等）
+          -> 到花名册（同"拉人"那张表）按花名找工作TG（按表头"工作TG"找列），每人一条
+             "请尽快注册stow钱包并填写钱包表单，否则会影响发薪流程"草稿发到收藏夹，
+             同时列出找不到花名的、没有工作TG的、同名多人没法确定的
+          -> 收藏夹发审批码19（测试19）一次性放行：逐个私发，间隔随机5-10秒，发送成功
+             即删草稿；只在生产环境启用（会私发真人，且关键词不分环境）
+
 运行前请务必先：
   1. pip install -r requirements.txt
   2. 在 .env 中填写 TG_API_ID / TG_API_HASH
   3. 用 BOT_ENV=test 运行测试配置，或用 BOT_ENV=prod 运行生产配置
-  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试9/测试91/测试92/测试111/测试13/测试14/测试15/测试17/测试18”，
+  4. 测试审批使用“测试1/测试2/测试3/测试11/测试21/测试6/测试6.1/测试6.2/测试7/测试9/测试91/测试92/测试111/测试13/测试14/测试15/测试17/测试18/测试19”，
      生产审批使用“1/2/3/11/21/6/6.1/6.2/7/9/91/92/111/13/14/15/17/18”。
 """
 
@@ -252,6 +262,13 @@ from group_pull import (
     format_people,
     plan_group_pull,
 )
+from uid_notice import (
+    UID_NOTICE_MESSAGE,
+    describe_columns as describe_uid_columns,
+    find_columns as find_uid_columns,
+    parse_name_list,
+    plan_uid_notices,
+)
 from training_notice import (
     TRAINING_NOTICE_MESSAGE,
     plan_training_notices,
@@ -331,6 +348,8 @@ wallet_reminder_events = StateStore(config.WALLET_REMINDER_STATE_PATH)
 wallet_reminder_lock = asyncio.Lock()
 training_notice_events = StateStore(config.TRAINING_NOTICE_STATE_PATH)
 training_notice_lock = asyncio.Lock()
+uid_notice_events = StateStore(config.UID_NOTICE_STATE_PATH)
+uid_notice_lock = asyncio.Lock()
 pull_group_events = StateStore(config.PULL_GROUP_STATE_PATH)
 pull_group_lock = asyncio.Lock()
 pull_group_roster_repo = TrainingSyncRosterRepository(
@@ -3617,6 +3636,227 @@ async def on_ssc_training_notice_release(event):
                 log.exception("[场景16] 私发给%s失败，草稿msg_id=%s", item["destination"], item["draft_id"])
                 await client.send_message(
                     reviewer.id, f"私发给{item['destination']}失败：{_no_training_word(str(exc)[:150], '')}（不会自动重发）",
+                    parse_mode=None,
+                )
+        if index < len(pending) - 1:
+            await asyncio.sleep(random.uniform(5, 10))
+
+
+# ==================== 场景十八：通知uid ====================
+UID_NOTICE_WAITING_KEY = "_waiting"
+
+
+def _no_uid_word(text, keyword):
+    """收藏夹里机器人自己发的提示也会被触发监听器收到：把触发词拆开一个点，保证提示
+    一定不含完整的"通知uid"（不分大小写）。"""
+    if not keyword:
+        return text
+    return re.sub(re.escape(keyword), keyword[:2] + "·" + keyword[2:], text or "", flags=re.IGNORECASE)
+
+
+def _uid_label(person):
+    status = person.get("status") or ""
+    return person["name"] + (f"（{status}）" if status and status != "在职" else "")
+
+
+async def queue_uid_notices(reviewer, key, tokens, notify):
+    """按名单查花名册工作TG，每人一条草稿进收藏夹，等审批码19放行。"""
+    rows = await asyncio.to_thread(pull_group_roster_repo.load_rows)
+    if find_uid_columns(rows) is None:
+        raise RuntimeError("花名册表头认不出来：" + describe_uid_columns(rows))
+    plan = plan_uid_notices(rows, tokens)
+    queued, skipped = [], []
+    for person in plan["to_send"]:
+        candidate = f"uid_notice:{key}:{person['tg'].casefold()}"
+        if any(i.get("candidate") == candidate and i.get("status") == "pending"
+               for i in outbox.all().values()):
+            skipped.append(f"{_uid_label(person)}（已有待发送草稿）")
+            continue
+        async with ssc_send_lock:
+            draft = await client.send_message(reviewer.id, UID_NOTICE_MESSAGE, parse_mode=None)
+            outbox.set(str(draft.id), {
+                "draft_id": draft.id, "destination": person["tg"], "reply_to": None,
+                "candidate": candidate, "expected_stage": "waiting_uid_notice_approval",
+                "updates": {"stage": "uid_notice_sent"}, "id_field": None,
+                "kind": "uid_notice", "status": "pending",
+                "review_chat_id": reviewer.id,
+                "approval_code": str(config.UID_NOTICE_APPROVAL_CODE),
+                "delete_draft_after_send": True,
+            })
+            state.update(candidate, stage="waiting_uid_notice_approval")
+        queued.append(f"{_uid_label(person)} → {person['tg']}")
+    summary = [f"名单共{len(tokens)}个。"]
+    if queued:
+        summary.append(
+            f"已生成{len(queued)}条草稿，确认无误后发送 {config.UID_NOTICE_APPROVAL_CODE} 放行：\n"
+            + "\n".join(queued)
+        )
+    else:
+        summary.append("没有可发送的人。")
+    if skipped:
+        summary.append("跳过：\n" + "\n".join(skipped))
+    if plan["not_found"]:
+        summary.append("花名册里找不到这个花名：\n" + "\n".join(plan["not_found"]))
+    if plan["no_tg"]:
+        summary.append("工作TG为空或认不出来，请人工通知：\n" + "\n".join(p["name"] for p in plan["no_tg"]))
+    if plan["ambiguous"]:
+        summary.append("同名的人不止一个且工作TG不同，没法确定是谁，没有生成草稿：\n"
+                       + "\n".join(plan["ambiguous"]))
+    uid_notice_events.update(
+        key, status="queued", names=len(tokens), queued=len(queued),
+        not_found=len(plan["not_found"]), no_tg=len(plan["no_tg"]),
+    )
+    await notify("\n".join(summary))
+
+
+@client.on(events.NewMessage())
+async def on_ssc_uid_notice_trigger(event):
+    """SSC在自己的收藏夹发"通知uid"（UID_NOTICE_TRIGGER_KEYWORD，不分大小写）：
+    机器人等SSC再发一条人员名单（花名，空格/逗号/换行隔开都行，也可以直接写@工作TG），
+    UID_NOTICE_WAIT_SECONDS秒内有效；触发消息里自己带了名单就不用再等。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    keyword = config.UID_NOTICE_TRIGGER_KEYWORD
+    if keyword.casefold() not in text.casefold():
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id:
+        return
+
+    async def notify(message):
+        await client.send_message(reviewer.id, _no_uid_word(message, keyword), parse_mode=None)
+
+    if not config.UID_NOTICE_ENABLED:
+        await notify("该流程未启用：花名册表格ID需要配置好，且只在生产环境生效。")
+        return
+    key = f"{event.chat_id}:{event.message.id}"
+    async with uid_notice_lock:
+        if uid_notice_events.get(key):
+            return
+        uid_notice_events.set(key, {"status": "processing"})
+    try:
+        remainder = re.sub(re.escape(keyword), " ", text, flags=re.IGNORECASE)
+        tokens = parse_name_list(remainder)
+        if tokens:
+            await queue_uid_notices(reviewer, key, tokens, notify)
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        async with uid_notice_lock:
+            uid_notice_events.set(UID_NOTICE_WAITING_KEY, {"since": now, "trigger_msg_id": event.message.id})
+        uid_notice_events.update(key, status="waiting_names")
+        await notify(
+            f"请把需要通知的人员名单（花名）发给我，一行一个或用空格、逗号隔开，"
+            f"{max(1, config.UID_NOTICE_WAIT_SECONDS // 60)}分钟内有效；发“取消”可取消。"
+        )
+    except Exception as exc:
+        uid_notice_events.update(key, status="failed")
+        log.exception("[场景18] 处理msg_id=%s失败", event.message.id)
+        await notify("该流程生成失败，请查看机器人日志。错误：" + str(exc)[:200])
+
+
+@client.on(events.NewMessage())
+async def on_ssc_uid_notice_names(event):
+    """等名单的状态下，SSC在收藏夹发来的下一条像名单的消息就是名单。机器人自己发的提示
+    （带标点的句子）、审批码、触发消息本身都不会被当成名单；不像名单的消息直接忽略，
+    继续等。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    if not text or config.UID_NOTICE_TRIGGER_KEYWORD.casefold() in text.casefold():
+        return
+    waiting = uid_notice_events.get(UID_NOTICE_WAITING_KEY)
+    if not waiting:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.UID_NOTICE_ENABLED:
+        return
+
+    async def notify(message):
+        await client.send_message(reviewer.id, _no_uid_word(message, config.UID_NOTICE_TRIGGER_KEYWORD),
+                                  parse_mode=None)
+
+    now = datetime.now(timezone.utc).timestamp()
+    if now - waiting.get("since", 0) > config.UID_NOTICE_WAIT_SECONDS:
+        async with uid_notice_lock:
+            uid_notice_events.set(UID_NOTICE_WAITING_KEY, None)
+        return
+    if text == "取消":
+        async with uid_notice_lock:
+            uid_notice_events.set(UID_NOTICE_WAITING_KEY, None)
+        await notify("已取消。")
+        return
+    if text in config.APPROVAL_CODES or text.isdigit():
+        return
+    tokens = parse_name_list(text)
+    if not tokens:
+        return
+    key = f"{event.chat_id}:{event.message.id}"
+    async with uid_notice_lock:
+        if not uid_notice_events.get(UID_NOTICE_WAITING_KEY) or uid_notice_events.get(key):
+            return
+        uid_notice_events.set(UID_NOTICE_WAITING_KEY, None)
+        uid_notice_events.set(key, {"status": "processing"})
+    try:
+        await queue_uid_notices(reviewer, key, tokens, notify)
+    except Exception as exc:
+        uid_notice_events.update(key, status="failed")
+        log.exception("[场景18] 处理名单msg_id=%s失败", event.message.id)
+        await notify("该流程生成失败，请查看机器人日志。错误：" + str(exc)[:200])
+
+
+@client.on(events.NewMessage())
+async def on_ssc_uid_notice_release(event):
+    """SSC在自己的收藏夹发送UID_NOTICE_APPROVAL_CODE（19/测试19），一次性放行本轮全部
+    待私发的草稿：逐个私发，间隔随机5-10秒，每条发送成功立即删除对应草稿；发送失败的
+    标failed并告诉SSC是谁，不自动重发（避免重复打扰）。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    if (event.raw_text or "").strip() != config.UID_NOTICE_APPROVAL_CODE:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.UID_NOTICE_ENABLED:
+        return
+    pending = sorted(
+        (i for i in outbox.all().values()
+         if i.get("kind") == "uid_notice" and i.get("status") == "pending"
+         and i.get("review_chat_id") == reviewer.id),
+        key=lambda i: i["draft_id"],
+    )
+    for index, item in enumerate(pending):
+        key = str(item["draft_id"])
+        current = outbox.all().get(key)
+        if not current or current.get("status") != "pending":
+            continue
+        async with ssc_send_lock:
+            try:
+                draft = await client.get_messages(reviewer.id, ids=item["draft_id"])
+                if not draft or not draft.raw_text:
+                    outbox.update(key, status="failed")
+                    await client.send_message(
+                        reviewer.id, f"{item['destination']} 的草稿已不存在，未发送。", parse_mode=None,
+                    )
+                    continue
+                outbox.update(key, status="sending", approval_msg_id=event.message.id)
+                recipient = await client.get_entity(item["destination"])
+                sent = await client.send_message(recipient, draft.raw_text, parse_mode=None)
+                state.update(item["candidate"], **item["updates"])
+                outbox.update(key, status="sent", sent_msg_id=sent.id)
+                log.info("[场景18] 已私发给%s msg_id=%s（%s/%s）",
+                         item["destination"], sent.id, index + 1, len(pending))
+                try:
+                    await client.delete_messages(reviewer.id, [item["draft_id"]])
+                except Exception:
+                    log.exception("[场景18] 已发送但删除收藏夹草稿失败，msg_id=%s", item["draft_id"])
+            except Exception as exc:
+                outbox.update(key, status="failed")
+                log.exception("[场景18] 私发给%s失败，草稿msg_id=%s", item["destination"], item["draft_id"])
+                await client.send_message(
+                    reviewer.id, f"私发给{item['destination']}失败：{str(exc)[:150]}（不会自动重发）",
                     parse_mode=None,
                 )
         if index < len(pending) - 1:

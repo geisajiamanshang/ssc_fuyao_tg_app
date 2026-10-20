@@ -276,6 +276,11 @@ PULL_GROUP_SPREADSHEET_ID = os.environ.get(
 PULL_GROUP_SHEET_GID = int(os.environ.get("PULL_GROUP_SHEET_GID", "139264850"))
 PULL_GROUP_CHAT_ID = int(os.environ.get("PULL_GROUP_CHAT_ID", "-5517058150"))
 PULL_GROUP_CENTER = os.environ.get("PULL_GROUP_CENTER", "技术中心")
+# 场景十八：SSC在自己的收藏夹发"通知uid"，等SSC再发一条人员名单（花名），到花名册（同"拉人"
+# 用的那张表）按花名找工作TG（AE列，按表头"工作TG"找列），每人一条草稿，审批码19放行后逐个私发。
+# 发完"通知uid"后等名单的时间；超时没发名单就作废，要重新发"通知uid"。
+UID_NOTICE_TRIGGER_KEYWORD = "通知uid"
+UID_NOTICE_WAIT_SECONDS = int(os.environ.get("UID_NOTICE_WAIT_SECONDS", "600"))
 WALLET_REMINDER_FORM_SPREADSHEET_ID = os.environ.get(
     "WALLET_REMINDER_FORM_SPREADSHEET_ID", "1SrvH7LuKqlekXzUUxbMAY3VNT54ApXNqG6bki9bnhXQ"
 )

@@ -85,6 +85,10 @@ WALLET_REMINDER_APPROVAL_CODE = "测试17" if ENVIRONMENT == "test" else "17"
 # 审批码18一次性放行全部（逐个私发私人TG，间隔随机5-10秒，发送成功即删草稿），
 # 不放进APPROVAL_CODES，由独立监听器处理。
 TRAINING_NOTICE_APPROVAL_CODE = "测试18" if ENVIRONMENT == "test" else "18"
+# 通知uid：收藏夹发"通知uid"并给出人员名单后，每人生成一条"注册stow钱包"私发草稿，
+# 审批码19一次性放行全部（逐个私发工作TG，间隔随机5-10秒，发送成功即删草稿），
+# 不放进APPROVAL_CODES，由独立监听器处理。
+UID_NOTICE_APPROVAL_CODE = "测试19" if ENVIRONMENT == "test" else "19"
 # 审批码151：收藏夹收到后把当日所有入职协议汇总，一条消息私发给领导审批
 # （ONBOARDING_AGREEMENT_LEADER_TG）。这个码本身就是SSC的"发送"指令，不先出草稿；
 # 同样不放进APPROVAL_CODES，由独立监听器处理（跟"15"精确匹配，互不触发）。
@@ -171,6 +175,9 @@ TRAINING_NOTICE_STATE_PATH = DB_PATH + ".training_notice.json"
 # 拉人会把真人加进群，触发词不分环境，所以只在生产环境启用。
 PULL_GROUP_ENABLED = ENVIRONMENT == "prod" and bool(PULL_GROUP_SPREADSHEET_ID and PULL_GROUP_CHAT_ID)
 PULL_GROUP_STATE_PATH = DB_PATH + ".pull_group.json"
+# 通知uid会私发真人，触发词不分环境，只在生产环境启用；花名册复用"拉人"那张表。
+UID_NOTICE_ENABLED = ENVIRONMENT == "prod" and bool(PULL_GROUP_SPREADSHEET_ID)
+UID_NOTICE_STATE_PATH = DB_PATH + ".uid_notice.json"
 # 复用 GROUP_REGULARIZATION_SYNC 作为数据来源和无详情版目标群，该群ID配置好
 # 之前自动跳过，不报错。
 DAILY_SYNC_ENABLED = bool(GROUP_REGULARIZATION_SYNC)
