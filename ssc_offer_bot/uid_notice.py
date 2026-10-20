@@ -16,7 +16,7 @@ import unicodedata
 from training_sync import _cell
 from wallet_reminder import normalize_work_tg
 
-UID_NOTICE_MESSAGE = "请尽快注册stow钱包并填写钱包表单，否则会影响发薪流程"
+UID_NOTICE_MESSAGE = "请尽快注册stow钱包并填写钱包表单，注册流程在全员群，否则会影响发薪流程"
 
 HEADER_SEARCH_ROWS = 6
 NAME_HEADER_WORD = "花名"

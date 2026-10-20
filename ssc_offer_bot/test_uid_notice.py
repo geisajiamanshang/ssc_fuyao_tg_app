@@ -44,6 +44,13 @@ ROSTER = [
 ]
 
 
+class MessageTests(unittest.TestCase):
+    def test_message_text_exact(self):
+        self.assertEqual(UID_NOTICE_MESSAGE,
+                         "请尽快注册stow钱包并填写钱包表单，注册流程在全员群，否则会影响发薪流程")
+        self.assertNotIn("通知uid", UID_NOTICE_MESSAGE.casefold())
+
+
 class ParseTests(unittest.TestCase):
     def test_split_on_newline_space_comma_and_dedupe(self):
         self.assertEqual(parse_name_list("甲\n乙 丙，丁、甲;戊"), ["甲", "乙", "丙", "丁", "戊"])
