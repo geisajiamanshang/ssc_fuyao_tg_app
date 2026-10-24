@@ -2227,13 +2227,18 @@ def batch_approval(text):
     return is_approval(value) and "以上" in value
 
 
-def apply_approval_evidence(rec, role, msg_id, sender_id):
+def apply_approval_evidence(rec, role, msg_id, sender_id, ordered=True):
+    """记录一级审批的证据。ordered=True（文字回复）时，前一级的审批消息必须比这条早；
+    表情回应不是新消息，msg_id是被点表情的那条消息（比如原Offer，id比一级回复的
+    "好的"还小），按消息id比先后会把正常的二级/终审表情误判成"卡在一级"，所以
+    表情回应传ordered=False，只看前一级有没有审批过。"""
     roles = approval_roles(rec.get("org_unit"))
     if role not in roles:
         return [], False
     evidence = rec.setdefault("approvals", {})
     missing = [r for r in roles[:roles.index(role)]
-               if not evidence.get(r) or (role != "final" and evidence[r]["message_id"] >= msg_id)]
+               if not evidence.get(r)
+               or (ordered and role != "final" and evidence[r]["message_id"] >= msg_id)]
     # 终审可先于缺失的初审/二级审批：保存事实，待其他级别补齐再放行。
     if role == "final":
         changed = not evidence.get(role)
@@ -2430,12 +2435,15 @@ async def _offer_record_for_message(message):
     return None, None
 
 
-async def _find_approval_reactor(peer_id, msg_id):
+async def _find_approval_reactors(peer_id, msg_id):
     """按APPROVAL_REACTION_EMOJIS逐个查该消息的表情回应者列表（用API精确查询，
-    不依赖UpdateMessageReactions里可能被截断的recent_reactions），在其中找第一个
-    用户名能对上一级/二级/终审领导的人；无关成员点的表情（哪怕同一条消息上
-    也有别人点了不相关表情）不会被误判。"""
+    不依赖UpdateMessageReactions里可能被截断的recent_reactions），返回其中所有用户名
+    能对上一级/二级/终审领导的人（去重）；无关成员点的表情（哪怕同一条消息上
+    也有别人点了不相关表情）不会被误判。
+    要返回全部而不是第一个：一级和二级经常点在同一条Offer消息上，只取第一个的话，
+    一级先点了，之后二级再点，永远只认出一级，二级的👌就被吞掉了。"""
     leader_usernames = {role_username(r) for r in ("first", "second", "final")}
+    found, seen = [], set()
     for emoji in config.APPROVAL_REACTION_EMOJIS:
         result = await client(GetMessageReactionsListRequest(
             peer=peer_id, id=msg_id, reaction=ReactionEmoji(emoticon=emoji), limit=100,
@@ -2443,9 +2451,11 @@ async def _find_approval_reactor(peer_id, msg_id):
         users_by_id = {user.id: user for user in result.users}
         for item in result.reactions:
             user = users_by_id.get(getattr(item.peer_id, "user_id", None))
-            if user is not None and (getattr(user, "username", "") or "").casefold() in leader_usernames:
-                return user
-    return None
+            if (user is not None and user.id not in seen
+                    and (getattr(user, "username", "") or "").casefold() in leader_usernames):
+                seen.add(user.id)
+                found.append(user)
+    return found
 
 
 @client.on(events.Raw(UpdateMessageReactions))
@@ -2465,21 +2475,31 @@ async def process_leadership_reaction(update):
     name, rec = await _offer_record_for_message(message)
     if not rec:
         return
-    reactor = await _find_approval_reactor(peer_id, update.msg_id)
-    if not reactor:
+    reactors = await _find_approval_reactors(peer_id, update.msg_id)
+    if not reactors:
         return
-    sender = SimpleNamespace(username=reactor.username, id=reactor.id)
     try:
         rec["approvals"] = dict(state.get(name).get("approvals", {}))
-        role = approval_role(sender, rec, update.msg_id)
-        if not role:
+        # 同一条消息上可能一级、二级、终审都点了：按一级→二级→终审的顺序逐个记账。
+        order = ("first", "second", "final")
+        by_role = {}
+        for reactor in reactors:
+            sender = SimpleNamespace(username=reactor.username, id=reactor.id)
+            role = approval_role(sender, rec, update.msg_id)
+            if role and role not in by_role:
+                by_role[role] = reactor
+        if not by_role:
             return
-        missing, changed = apply_approval_evidence(rec, role, update.msg_id, reactor.id)
-        if changed:
-            state.update(name, approvals=rec["approvals"], last_approval_msg_id=update.msg_id)
-        if missing:
-            await notify_missing(name, missing)
-            return
+        changed_any = False
+        for role in sorted(by_role, key=order.index):
+            missing, changed = apply_approval_evidence(
+                rec, role, update.msg_id, by_role[role].id, ordered=False)
+            changed_any = changed_any or changed
+            if missing:
+                if changed_any:
+                    state.update(name, approvals=rec["approvals"], last_approval_msg_id=update.msg_id)
+                await notify_missing(name, missing)
+                return
         state.update(name, approvals=rec["approvals"], last_approval_msg_id=update.msg_id)
         await advance_offer(name, rec)
     except Exception:

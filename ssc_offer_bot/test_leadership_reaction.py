@@ -17,7 +17,7 @@ tree = ast.parse(source)
 selected = {
     'approval_roles', 'role_username', 'approval_role', 'apply_approval_evidence',
     'advance_offer', 'notify_missing', '_offer_record_for_message',
-    '_find_approval_reactor', 'process_leadership_reaction',
+    '_find_approval_reactors', 'process_leadership_reaction',
 }
 config = NS(
     LEADER_FIRST='first_user', LEADER_SECOND_TECH='second_user', LEADER_FINAL='final_user',
@@ -114,6 +114,80 @@ class LeadershipReactionTests(unittest.IsolatedAsyncioTestCase):
         call = ns['queue_group_message'].call_args
         self.assertIn('终审', call.args[1])
         self.assertEqual(call.kwargs['reply_to'], 10)
+
+    async def test_second_reaction_on_original_offer_after_first_text_reply_advances_to_final(self):
+        # 线上真实情况：一级先文字回复"好的"（id 15 > Offer原消息id 10），二级随后直接在
+        # Offer原消息（id 10）上点👌。以前按消息id比先后，误判"卡在一级"，终审提示发不出去。
+        rec = {
+            'org_unit': '技术中心', 'stage': 'waiting_second_review',
+            'offer_confirm_msg_id': 10, 'second_review_msg_id': 20,
+            'approvals': {'first': {'message_id': 15, 'sender_id': 1}},
+        }
+        ns['state'] = Store({'里昂': rec})
+        offer = NS(id=10, sender_id=99, raw_text='【offer信息确认】\n入职编制组织：技术中心\n候选人姓名：里昂')
+        ns['client'].get_messages = AsyncMock(return_value=offer)
+        second_leader = NS(id=2, username='second_user')
+        ns['client'].call_mock = AsyncMock(return_value=reactions_result(second_leader))
+
+        await ns['process_leadership_reaction'](NS(peer=NS(), msg_id=10))
+
+        self.assertEqual(rec['approvals']['second']['sender_id'], 2)
+        ns['client'].send_message.assert_not_awaited()          # 没有"卡在一级"的提示
+        call = ns['queue_group_message'].call_args
+        self.assertEqual(call.args[1], '@final_user 初审已通过，请领导终审，谢谢')
+        self.assertEqual(call.kwargs['reply_to'], 10)
+
+    async def test_first_and_second_both_reacted_on_same_offer_second_is_not_swallowed(self):
+        # 一级、二级都点在Offer原消息上：以前只认出列表里第一个领导（一级），二级被吞。
+        rec = {
+            'org_unit': '技术中心', 'stage': 'waiting_second_review',
+            'offer_confirm_msg_id': 10, 'second_review_msg_id': 20,
+            'approvals': {'first': {'message_id': 10, 'sender_id': 1}},
+        }
+        ns['state'] = Store({'里昂': rec})
+        offer = NS(id=10, sender_id=99, raw_text='【offer信息确认】\n入职编制组织：技术中心\n候选人姓名：里昂')
+        ns['client'].get_messages = AsyncMock(return_value=offer)
+        ns['client'].call_mock = AsyncMock(return_value=reactions_result(
+            NS(id=1, username='first_user'), NS(id=3, username='unrelated_member'),
+            NS(id=2, username='second_user')))
+
+        await ns['process_leadership_reaction'](NS(peer=NS(), msg_id=10))
+
+        self.assertIn('second', rec['approvals'])
+        self.assertIn('终审', ns['queue_group_message'].call_args.args[1])
+
+    async def test_all_three_reacted_in_one_go_records_in_order(self):
+        rec = {
+            'org_unit': '技术中心', 'stage': 'sent_to_leadership',
+            'offer_confirm_msg_id': 10, 'approvals': {},
+        }
+        ns['state'] = Store({'里昂': rec})
+        offer = NS(id=10, sender_id=99, raw_text='【offer信息确认】\n入职编制组织：技术中心\n候选人姓名：里昂')
+        ns['client'].get_messages = AsyncMock(return_value=offer)
+        ns['client'].call_mock = AsyncMock(return_value=reactions_result(
+            NS(id=3, username='final_user'), NS(id=2, username='second_user'),
+            NS(id=1, username='first_user')))
+
+        await ns['process_leadership_reaction'](NS(peer=NS(), msg_id=10))
+
+        self.assertEqual(set(rec['approvals']), {'first', 'second', 'final'})
+        ns['client'].send_message.assert_not_awaited()
+
+    async def test_second_reaction_without_any_first_approval_still_reports_missing_first(self):
+        rec = {
+            'org_unit': '技术中心', 'stage': 'sent_to_leadership',
+            'offer_confirm_msg_id': 10, 'approvals': {},
+        }
+        ns['state'] = Store({'里昂': rec})
+        offer = NS(id=10, sender_id=99, raw_text='【offer信息确认】\n入职编制组织：技术中心\n候选人姓名：里昂')
+        ns['client'].get_messages = AsyncMock(return_value=offer)
+        ns['client'].call_mock = AsyncMock(return_value=reactions_result(NS(id=2, username='second_user')))
+
+        await ns['process_leadership_reaction'](NS(peer=NS(), msg_id=10))
+
+        self.assertNotIn('second', rec['approvals'])
+        self.assertIn('卡在一级', ns['client'].send_message.call_args.args[1])
+        ns['queue_group_message'].assert_not_awaited()
 
     async def test_unrelated_member_reaction_is_ignored(self):
         rec = {
