@@ -2480,6 +2480,17 @@ async def process_leadership_reaction(update):
         return
     try:
         rec["approvals"] = dict(state.get(name).get("approvals", {}))
+        # 一级可能点在Offer原消息上、二级点在@他的提示消息上（或反过来），所以把这条记录的
+        # 几条审批锚点消息上的领导表情都收集起来一起记账。
+        seen_ids = {u.id for u in reactors}
+        for field in ("offer_confirm_msg_id", "second_review_msg_id", "final_review_msg_id"):
+            anchor_id = rec.get(field)
+            if not anchor_id or anchor_id == update.msg_id:
+                continue
+            for user in await _find_approval_reactors(peer_id, anchor_id):
+                if user.id not in seen_ids:
+                    seen_ids.add(user.id)
+                    reactors.append(user)
         # 同一条消息上可能一级、二级、终审都点了：按一级→二级→终审的顺序逐个记账。
         order = ("first", "second", "final")
         by_role = {}
@@ -2490,6 +2501,14 @@ async def process_leadership_reaction(update):
                 by_role[role] = reactor
         if not by_role:
             return
+        if "first" not in by_role and not rec["approvals"].get("first"):
+            # 没有一级审批记录（比如一级的文字回复发生在机器人重启期间）：按群里历史回放
+            # 一遍，把一级、二级已有的文字回复补回来，再判断是不是真的卡在一级。
+            try:
+                await recover_approval_evidence(SimpleNamespace(message=SimpleNamespace(id=0)), [(name, rec)])
+            except Exception:
+                log.exception("[Offer审批] 候选人=%s 回放历史审批证据失败，按现有记录判断", name)
+            rec["approvals"] = dict(state.get(name).get("approvals", {}))
         changed_any = False
         for role in sorted(by_role, key=order.index):
             missing, changed = apply_approval_evidence(

@@ -88,6 +88,7 @@ class LeadershipReactionTests(unittest.IsolatedAsyncioTestCase):
         ns['queue_group_message'] = AsyncMock()
         ns['handle_final_approved'] = AsyncMock()
         ns['get_ssc_reviewer'] = AsyncMock(return_value=NS(id=99))
+        ns['recover_approval_evidence'] = AsyncMock()
         client = MockClient()
         client.send_message = AsyncMock()
         client.get_me = AsyncMock(return_value=NS(id=99))
@@ -188,6 +189,51 @@ class LeadershipReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('second', rec['approvals'])
         self.assertIn('卡在一级', ns['client'].send_message.call_args.args[1])
         ns['queue_group_message'].assert_not_awaited()
+
+    async def test_first_reaction_on_offer_and_second_reaction_on_prompt_both_count(self):
+        # 一级点在Offer原消息(10)上，二级点在@他的提示消息(20)上：点的是不同的消息，
+        # 二级点之后要把一级的表情也算上，不能卡在一级。
+        rec = {
+            'org_unit': '技术中心', 'stage': 'waiting_ssc_waiting_second_review',
+            'offer_confirm_msg_id': 10, 'second_review_msg_id': 20, 'approvals': {},
+        }
+        ns['state'] = Store({'里昂': rec})
+        prompt = NS(id=20, sender_id=99, raw_text='@second_user 初审已通过，请领导二级审批，谢谢')
+        ns['client'].get_messages = AsyncMock(return_value=prompt)
+
+        async def by_message(req):
+            return reactions_result(*([NS(id=2, username='second_user')] if req.id == 20
+                                      else [NS(id=1, username='first_user')]))
+        ns['client'].call_mock = AsyncMock(side_effect=by_message)
+
+        await ns['process_leadership_reaction'](NS(peer=NS(), msg_id=20))
+
+        self.assertEqual(set(rec['approvals']), {'first', 'second'})
+        self.assertIn('终审', ns['queue_group_message'].call_args.args[1])
+        ns['client'].send_message.assert_not_awaited()
+
+    async def test_missing_first_is_recovered_from_history_before_reporting_stuck(self):
+        rec = {
+            'org_unit': '技术中心', 'stage': 'sent_to_leadership',
+            'offer_confirm_msg_id': 10, 'approvals': {},
+        }
+        store = Store({'里昂': rec})
+        ns['state'] = store
+
+        async def replay(event, records):
+            records[0][1]['approvals']['first'] = {'message_id': 15, 'sender_id': 1}
+            store.update('里昂', approvals=records[0][1]['approvals'])
+        ns['recover_approval_evidence'] = AsyncMock(side_effect=replay)
+        offer = NS(id=10, sender_id=99, raw_text='【offer信息确认】\n入职编制组织：技术中心\n候选人姓名：里昂')
+        ns['client'].get_messages = AsyncMock(return_value=offer)
+        ns['client'].call_mock = AsyncMock(return_value=reactions_result(NS(id=2, username='second_user')))
+
+        await ns['process_leadership_reaction'](NS(peer=NS(), msg_id=10))
+
+        ns['recover_approval_evidence'].assert_awaited_once()
+        self.assertIn('second', rec['approvals'])
+        self.assertIn('终审', ns['queue_group_message'].call_args.args[1])
+        ns['client'].send_message.assert_not_awaited()
 
     async def test_unrelated_member_reaction_is_ignored(self):
         rec = {
