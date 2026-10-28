@@ -190,6 +190,9 @@ DAILY_SYNC_ENABLED = bool(GROUP_REGULARIZATION_SYNC)
 SELF_EVAL_ENABLED = ENVIRONMENT == "prod" and bool(
     GROUP_SSC_WORK and OPENAI_API_KEY and ONEHR_LOGIN_CODE and ONEHR_LOGIN_PASSWORD
 )
+# "员工绩效"触发词也不分环境（测试、生产共用一个Telegram账号），只在生产环境响应，
+# 否则收藏夹里会同时收到两份文档。
+MONTHLY_REPORTS_ENABLED = ENVIRONMENT == "prod" and bool(MONTHLY_REPORTS_SOURCE_CHAT)
 # 生产只接受指定机器人的提醒；测试群允许SSC人工粘贴提醒做联调。
 ALLOW_MANUAL_TRIGGERS = ENVIRONMENT == "test"
 # GROUP_REGULARIZATION_SYNC / GROUP_PRE_ONBOARDING 未来若在某环境留空（None），

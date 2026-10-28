@@ -149,6 +149,12 @@ DAILY_SYNC_CENTER_DEPARTMENT_KEYWORDS = {
 }
 DAILY_SYNC_COMPANY_LABEL = "恒睿"
 
+# ========== 员工绩效：汇总本月日报为Word文档 ==========
+# 场景十九：SSC在自己的收藏夹发"员工绩效"，把日报来源群里本账号（扶摇）当月发的所有
+# 日报汇总成一份Word文档发回收藏夹，方便下载。日报来源群：共享服务中心-SSC工作群。
+MONTHLY_REPORTS_TRIGGER_KEYWORD = "员工绩效"
+MONTHLY_REPORTS_SOURCE_CHAT = int(os.environ.get("MONTHLY_REPORTS_SOURCE_CHAT", "-5116852931")) or None
+
 # ========== 员工自评自动填表 ==========
 # 触发关键词：SSC在自己的收藏夹发这句话（包含即可，不要求整条消息完全一样）。
 SELF_EVAL_TRIGGER_KEYWORD = "员工自评"

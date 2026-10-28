@@ -82,6 +82,11 @@ SSC Offer 审批流转自动化 主程序。
              提交；这一步没有Telegram群转发环节，所以不经过审批码
              （APPROVAL_CODES）那一套
 
+  场景十九：SSC在自己的收藏夹发送"员工绩效"
+          -> 到"共享服务中心-SSC工作群"（-5116852931）找本账号（扶摇）当月发送的所有日报
+             （[TYPE:日报]标签），按日期汇总成一份Word文档（日报原文不改写）发回收藏夹，
+             可以直接下载；没有审批码，只在生产环境启用
+
   场景十一：SSC在自己的收藏夹发送"帐号申请"
           -> 读取"花名册"和"花名册（机器人）"两张在线Google表格（同名以
              "花名册"为准，冲突名单静默按"花名册"处理，不再提示收藏夹），
@@ -160,6 +165,7 @@ SSC Offer 审批流转自动化 主程序。
 """
 
 import asyncio
+import io
 import os
 from attendance_reply import AttendanceReplies
 import logging
@@ -235,6 +241,7 @@ from daily_sync import (
     classify_and_bucket,
     new_center_bucket,
 )
+from monthly_reports_doc import build_reports_docx, mask_trigger_keywords
 from self_eval import (
     build_self_eval_prompt,
     call_openai_chat,
@@ -335,6 +342,7 @@ roster_code_repo = RosterCodeRepository(
 )
 daily_sync_lock = asyncio.Lock()
 self_eval_lock = asyncio.Lock()
+monthly_reports_lock = asyncio.Lock()
 account_application_lock = asyncio.Lock()
 account_application_sheets = AccountApplicationSheetsRepository(
     config.ACCOUNT_APPLICATION_ROSTER_SPREADSHEET_ID,
@@ -916,6 +924,72 @@ async def on_ssc_daily_sync_trigger(event):
             "[当日人事信息数据同步] 已生成详细版/无详情版草稿，等待SSC发送%s/%s放行",
             config.DAILY_SYNC_DETAIL_APPROVAL_CODE, config.DAILY_SYNC_SUMMARY_APPROVAL_CODE,
         )
+
+
+async def load_month_reports(reviewer_id, today):
+    """日报来源群（MONTHLY_REPORTS_SOURCE_CHAT）里本账号（扶摇）当月发的日报，[(日期, 原文)]
+    按日期升序。从新到旧取本账号发的消息，早于本月初3天（日报的DATE标签可能跟发送日期
+    差一两天）就不用再往前翻了，不把群里的全部历史都翻一遍。"""
+    zone = ZoneInfo(config.DAILY_REPORT_TIMEZONE)
+    cutoff = datetime(today.year, today.month, 1, tzinfo=zone) - timedelta(days=3)
+    messages = []
+    async for message in client.iter_messages(config.MONTHLY_REPORTS_SOURCE_CHAT, from_user=reviewer_id):
+        if message.date.astimezone(zone) < cutoff:
+            break
+        messages.append(message)
+    return collect_month_reports(messages, today.year, today.month)
+
+
+@client.on(events.NewMessage())
+async def on_ssc_monthly_reports_trigger(event):
+    """SSC在自己的收藏夹发"员工绩效"（MONTHLY_REPORTS_TRIGGER_KEYWORD）：到日报来源群
+    （-5116852931）找本账号（扶摇）当月发的所有日报（[TYPE:日报]标签），汇总成一份
+    Word文档（日报原文不改写）发回收藏夹，可以直接下载。
+
+    收藏夹里机器人自己发的提示/文档说明也会被收到：都经mask_trigger_keywords去掉了完整
+    的触发词，不会自己触发自己。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    keyword = config.MONTHLY_REPORTS_TRIGGER_KEYWORD
+    if keyword not in (event.raw_text or ""):
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+
+    async def notify(message):
+        await client.send_message(
+            reviewer.id, mask_trigger_keywords(message, (keyword,)), parse_mode=None,
+        )
+
+    if not config.MONTHLY_REPORTS_ENABLED:
+        await notify("日报汇总未启用：只在生产环境生效，且日报来源群 MONTHLY_REPORTS_SOURCE_CHAT 需要配置好。")
+        return
+    async with monthly_reports_lock:
+        try:
+            zone = ZoneInfo(config.DAILY_REPORT_TIMEZONE)
+            now = datetime.now(zone)
+            period_label = f"{now.year}年{now.month}月"
+            reports = await load_month_reports(reviewer.id, now.date())
+            if not reports:
+                await notify(
+                    f"在群里没找到你（扶摇）本月（{period_label}）发的日报（需要带 [TYPE:日报] 标签），"
+                    "没有生成文档。"
+                )
+                return
+            data = build_reports_docx(reports, "扶摇", period_label, now)
+            document = io.BytesIO(data)
+            document.name = f"扶摇-{now.year}年{now.month}月日报汇总.docx"
+            await client.send_file(
+                reviewer.id, document, force_document=True,
+                caption=mask_trigger_keywords(
+                    f"{period_label}日报汇总：共{len(reports)}篇，"
+                    f"{reports[0][0].isoformat()} 至 {reports[-1][0].isoformat()}。", (keyword,)),
+            )
+            log.info("[日报汇总] 已生成并发送文档，共%s篇日报", len(reports))
+        except Exception:
+            log.exception("[日报汇总] 生成失败，msg_id=%s", event.message.id)
+            await notify("日报汇总文档生成失败，请查看机器人日志。")
 
 
 @client.on(events.NewMessage())
