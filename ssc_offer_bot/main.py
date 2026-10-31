@@ -87,6 +87,13 @@ SSC Offer 审批流转自动化 主程序。
              （[TYPE:日报]标签），按日期汇总成一份Word文档（日报原文不改写）发回收藏夹，
              可以直接下载；没有审批码，只在生产环境启用
 
+  场景二十：SSC在自己的收藏夹发送"群发"（整条消息就是这两个字）
+          -> 机器人问要群发的TG名单（空格隔开或一行一个）-> 回显名单，SSC回"1"确认
+          -> 问要群发的图文消息 -> SSC发那条消息，机器人回显，SSC回"1"确认
+          -> 把这条图文消息逐个私发给名单里的每个TG（间隔5-10秒），发完汇总成功/失败；
+             任一步回"取消"终止，30分钟没回应作废；机器人的提示都以"【群发】"开头；
+             只在生产环境启用；会话等"1"期间，这个"1"不会同时放行Offer草稿
+
   场景十一：SSC在自己的收藏夹发送"帐号申请"
           -> 读取"花名册"和"花名册（机器人）"两张在线Google表格（同名以
              "花名册"为准，冲突名单静默按"花名册"处理，不再提示收藏夹），
@@ -170,6 +177,7 @@ import os
 from attendance_reply import AttendanceReplies
 import logging
 import random
+import time
 import unicodedata
 import re
 from datetime import datetime, timedelta, timezone
@@ -242,6 +250,7 @@ from daily_sync import (
     new_center_bucket,
 )
 from monthly_reports_doc import build_reports_docx, mask_trigger_keywords
+import mass_send
 from self_eval import (
     build_self_eval_prompt,
     call_openai_chat,
@@ -343,6 +352,11 @@ roster_code_repo = RosterCodeRepository(
 daily_sync_lock = asyncio.Lock()
 self_eval_lock = asyncio.Lock()
 monthly_reports_lock = asyncio.Lock()
+mass_send_lock = asyncio.Lock()
+mass_send_events = StateStore(config.MASS_SEND_STATE_PATH)
+# 已被群发会话当作确认码用掉的"1"的消息ID（on_ssc_send_approval看到就让开）；后台群发任务的引用。
+mass_send_consumed = []
+mass_send_tasks = set()
 account_application_lock = asyncio.Lock()
 account_application_sheets = AccountApplicationSheetsRepository(
     config.ACCOUNT_APPLICATION_ROSTER_SPREADSHEET_ID,
@@ -661,6 +675,12 @@ async def on_ssc_send_approval(event):
     me = await client.get_me()
     reviewer = await get_ssc_reviewer()
     if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    # 群发会话在等"1"确认时，这个"1"是群发的，不能顺带放行别的待审批草稿。
+    if getattr(config, "MASS_SEND_ENABLED", False) and approval_code == config.MASS_SEND_CONFIRM_CODE and (
+            event.message.id in mass_send_consumed
+            or mass_send.waiting_for_confirm(
+                mass_send_events.get("session"), time.time(), config.MASS_SEND_WAIT_SECONDS)):
         return
     async with ssc_send_lock:
         all_outbox_items = list(outbox.all().values())
@@ -990,6 +1010,188 @@ async def on_ssc_monthly_reports_trigger(event):
         except Exception:
             log.exception("[日报汇总] 生成失败，msg_id=%s", event.message.id)
             await notify("日报汇总文档生成失败，请查看机器人日志。")
+
+
+def mass_send_error_reason(exc):
+    """私发失败的原因，写成SSC看得懂的一句话。"""
+    if isinstance(exc, (errors.UsernameNotOccupiedError, errors.UsernameInvalidError)):
+        return "用户名不存在"
+    if isinstance(exc, ValueError):
+        return "找不到这个用户名"
+    if isinstance(exc, errors.UserPrivacyRestrictedError):
+        return "对方隐私设置不接收陌生人消息"
+    if isinstance(exc, (errors.UserIsBlockedError, errors.YouBlockedUserError)):
+        return "对方已屏蔽，或你屏蔽了对方"
+    if isinstance(exc, errors.InputUserDeactivatedError):
+        return "账号已注销"
+    return f"发送失败：{type(exc).__name__}"
+
+
+async def run_mass_send(reviewer_id, tgs, content_id):
+    """把收藏夹里的content_id这条图文消息逐个私发给tgs；发完（或中止）发汇总到收藏夹。
+    每个人之间随机间隔MASS_SEND_INTERVAL_RANGE秒；遇到PeerFlood（被限制向陌生人发消息）
+    或者要等很久的FloodWait就中止，剩下的列在汇总里。"""
+
+    async def notify(message):
+        await client.send_message(reviewer_id, message, parse_mode=None)
+
+    ok, failed, remaining = [], [], []
+    try:
+        # 发送前重新取一次消息：SSC在确认前编辑过内容的话，以最终版本为准。
+        content = await client.get_messages(reviewer_id, ids=content_id)
+        if not content or (not content.raw_text and not usable_media(content)):
+            await notify(mass_send.NOTICE_PREFIX + "要群发的那条消息找不到了（可能已被删除），没有发送。")
+            return
+        await notify(
+            f"{mass_send.NOTICE_PREFIX}开始群发，共{len(tgs)}个，每个之间随机间隔"
+            f"{config.MASS_SEND_INTERVAL_RANGE[0]}-{config.MASS_SEND_INTERVAL_RANGE[1]}秒，"
+            "发完会汇报结果。")
+        for index, tg in enumerate(tgs):
+            try:
+                try:
+                    entity = await client.get_entity(tg)
+                    await client.send_message(entity, content)
+                except errors.FloodWaitError as e:
+                    if e.seconds > 120:
+                        raise
+                    await asyncio.sleep(e.seconds + 1)
+                    await client.send_message(entity, content)
+                ok.append(tg)
+            except (errors.PeerFloodError, errors.FloodWaitError) as e:
+                log.warning("[群发] %s触发限流(%s)，中止，剩余%s个", tg, type(e).__name__, len(tgs) - index)
+                remaining = list(tgs[index:])
+                break
+            except Exception as e:
+                log.warning("[群发] 发给%s失败：%r", tg, e)
+                failed.append((tg, mass_send_error_reason(e)))
+            if index < len(tgs) - 1:
+                await asyncio.sleep(random.uniform(*config.MASS_SEND_INTERVAL_RANGE))
+        log.info("[群发] 结束：成功%s，失败%s，未发送%s", len(ok), len(failed), len(remaining))
+    except Exception:
+        log.exception("[群发] 执行中出错")
+        done = set(ok) | {f[0] for f in failed}
+        remaining = [tg for tg in tgs if tg not in done]
+        await notify(mass_send.NOTICE_PREFIX + "群发执行中出错，已中止，请查看机器人日志。")
+    finally:
+        mass_send_events.set("session", {})
+    await notify(mass_send.format_report(ok, failed, remaining))
+
+
+@client.on(events.NewMessage())
+async def on_ssc_mass_send(event):
+    """SSC在自己的收藏夹发"群发"（整条消息就是这两个字，MASS_SEND_TRIGGER）：
+    机器人问要群发的TG名单（空格隔开或一行一个）-> 回显名单，SSC回"1"确认
+    -> 问要群发的图文消息 -> SSC发那条消息，机器人回显，SSC回"1"确认
+    -> 逐个私发给名单里的每个TG，发完汇总成功/失败。
+    任何一步回"取消"终止；MASS_SEND_WAIT_SECONDS内没回应作废。
+
+    机器人发到收藏夹的提示都以"【群发】"开头，收到时靠这个前缀认出是自己发的、不处理。
+    确认码"1"跟Offer审批码相同：这里确认过的"1"登记在mass_send_consumed里，
+    on_ssc_send_approval看到就让开，不会顺带放行别的待审批草稿。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    if text.startswith(mass_send.NOTICE_PREFIX):
+        return
+    session = mass_send_events.get("session") or {}
+    in_session = not mass_send.session_expired(session, time.time(), config.MASS_SEND_WAIT_SECONDS)
+    is_trigger = text == config.MASS_SEND_TRIGGER
+    if not is_trigger and not in_session:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.MASS_SEND_ENABLED:
+        if is_trigger:
+            log.info("[群发] 收到触发词，但群发只在生产环境启用，忽略")
+        return
+
+    async def notify(message):
+        await client.send_message(reviewer.id, mass_send.NOTICE_PREFIX + message, parse_mode=None)
+
+    minutes = max(1, config.MASS_SEND_WAIT_SECONDS // 60)
+    confirm_code = config.MASS_SEND_CONFIRM_CODE
+    async with mass_send_lock:
+        session = mass_send_events.get("session") or {}
+        in_session = not mass_send.session_expired(session, time.time(), config.MASS_SEND_WAIT_SECONDS)
+        stage = session.get("stage") if in_session else None
+
+        def advance(**fields):
+            mass_send_events.set("session", {**session, **fields, "since": time.time()})
+
+        if text == confirm_code and stage in mass_send.CONFIRM_STAGES:
+            # 先登记再处理：approval处理器不管先后都能认出这个"1"是群发的确认。
+            mass_send_consumed.append(event.message.id)
+            del mass_send_consumed[:-50]
+        if is_trigger:
+            if stage == mass_send.STAGE_SENDING:
+                await notify("上一次群发还在进行中，发完会汇报结果，请稍后再发“群发”。")
+                return
+            mass_send_events.set("session", {"stage": mass_send.STAGE_WAITING_TGS, "since": time.time()})
+            await notify(
+                "请发送要群发的TG，空格隔开，或者一行一个，例如：\n@aaaaa @bbbbb\n"
+                f"发送后我会回显名单，核对无误回复 {confirm_code} 确认；回复 取消 随时终止"
+                f"（{minutes}分钟内有效）。")
+            return
+        if stage is None or stage == mass_send.STAGE_SENDING:
+            return
+        if text == "取消":
+            mass_send_events.set("session", {})
+            await notify("已取消群发。")
+            return
+
+        if stage in (mass_send.STAGE_WAITING_TGS, mass_send.STAGE_WAITING_TGS_CONFIRM):
+            if text == confirm_code and stage == mass_send.STAGE_WAITING_TGS_CONFIRM:
+                advance(stage=mass_send.STAGE_WAITING_MESSAGE)
+                await notify(
+                    "请发送要群发的图文消息（一条消息，文字、图片都可以；发出后再编辑也行，以确认时的最终内容为准）。"
+                    "回复 取消 终止。")
+                return
+            tgs, invalid = mass_send.parse_tg_list(text)
+            if not mass_send.looks_like_tg_list_attempt(tgs, invalid):
+                return
+            if invalid:
+                await notify("下面这些认不出是TG用户名（要写成 @用户名，至少5个字符）：\n"
+                             + "\n".join(invalid) + "\n请改好后重新发送完整名单。")
+                return
+            if len(tgs) > config.MASS_SEND_MAX_RECIPIENTS:
+                await notify(f"名单有{len(tgs)}个，超过一次最多{config.MASS_SEND_MAX_RECIPIENTS}个的上限，"
+                             "请分批发送。")
+                return
+            advance(stage=mass_send.STAGE_WAITING_TGS_CONFIRM, tgs=tgs)
+            await notify(
+                f"共{len(tgs)}个TG：\n{mass_send.format_tg_list(tgs)}\n"
+                f"确认无误回复 {confirm_code}；有误请重新发送完整名单；回复 取消 终止。")
+            return
+
+        if stage == mass_send.STAGE_WAITING_MESSAGE:
+            if text == confirm_code or text in config.APPROVAL_CODES:
+                return
+            message = event.message
+            if not text and not usable_media(message):
+                return
+            advance(stage=mass_send.STAGE_WAITING_SEND_CONFIRM, content_id=message.id)
+            parts = []
+            if text:
+                parts.append(f"文字{len(text)}字")
+            if usable_media(message):
+                parts.append("带图片/文件")
+            warning = ""
+            if getattr(message, "grouped_id", None):
+                warning = "\n注意：这是相册中的一张，只会发这一条，其余的图不会发；要发多张图请分多次群发。"
+            await notify(
+                f"已收到要群发的消息（{'，'.join(parts)}），将私发给{len(session.get('tgs', []))}个TG。{warning}\n"
+                f"确认开始群发回复 {confirm_code}；回复 取消 终止。")
+            return
+
+        if stage == mass_send.STAGE_WAITING_SEND_CONFIRM and text == confirm_code:
+            tgs = list(session.get("tgs", []))
+            content_id = session.get("content_id")
+            advance(stage=mass_send.STAGE_SENDING)
+            # 发送要花几分钟：放到后台任务里，别卡住这个消息的后续处理。
+            task = asyncio.create_task(run_mass_send(reviewer.id, tgs, content_id))
+            mass_send_tasks.add(task)
+            task.add_done_callback(mass_send_tasks.discard)
 
 
 @client.on(events.NewMessage())

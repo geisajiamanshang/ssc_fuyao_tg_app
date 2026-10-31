@@ -155,6 +155,16 @@ DAILY_SYNC_COMPANY_LABEL = "恒睿"
 MONTHLY_REPORTS_TRIGGER_KEYWORD = "员工绩效"
 MONTHLY_REPORTS_SOURCE_CHAT = int(os.environ.get("MONTHLY_REPORTS_SOURCE_CHAT", "-5116852931")) or None
 
+# ========== 群发 ==========
+# 场景二十：SSC在自己的收藏夹发"群发"（整条消息就是这两个字），机器人问名单 -> 确认 -> 问
+# 图文消息 -> 确认，再逐个私发。每一步等SSC回应的最长时间（秒），超时作废要重新发"群发"。
+MASS_SEND_TRIGGER = "群发"
+MASS_SEND_WAIT_SECONDS = int(os.environ.get("MASS_SEND_WAIT_SECONDS", "1800"))
+# 一次最多群发给多少个TG，防止名单贴错一大串。
+MASS_SEND_MAX_RECIPIENTS = int(os.environ.get("MASS_SEND_MAX_RECIPIENTS", "100"))
+# 逐个私发之间随机间隔多少秒（防止被Telegram判定刷屏限流）。
+MASS_SEND_INTERVAL_RANGE = (5, 10)
+
 # ========== 员工自评自动填表 ==========
 # 触发关键词：SSC在自己的收藏夹发这句话（包含即可，不要求整条消息完全一样）。
 SELF_EVAL_TRIGGER_KEYWORD = "员工自评"
