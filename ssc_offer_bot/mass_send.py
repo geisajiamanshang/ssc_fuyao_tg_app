@@ -17,9 +17,11 @@ STAGE_WAITING_TGS = "waiting_tgs"
 STAGE_WAITING_TGS_CONFIRM = "waiting_tgs_confirm"
 STAGE_WAITING_MESSAGE = "waiting_message"
 STAGE_WAITING_SEND_CONFIRM = "waiting_send_confirm"
+STAGE_DIFF_WAITING_INPUT = "diff_waiting_input"
+STAGE_DIFF_WAITING_CONFIRM = "diff_waiting_confirm"
 STAGE_SENDING = "sending"
 # 这两个阶段在等SSC发确认码"1"。
-CONFIRM_STAGES = (STAGE_WAITING_TGS_CONFIRM, STAGE_WAITING_SEND_CONFIRM)
+CONFIRM_STAGES = (STAGE_WAITING_TGS_CONFIRM, STAGE_WAITING_SEND_CONFIRM, STAGE_DIFF_WAITING_CONFIRM)
 
 _SPLIT_RE = re.compile(r"[\s,，、;；]+")
 
@@ -75,3 +77,72 @@ def format_report(ok, failed, remaining):
         lines.append("Telegram限流，已中止，下面这些没有发（过一阵再用\"群发\"重发）：")
         lines.extend(remaining)
     return "\n".join(lines)
+
+
+# ---------- "不同群发"：每个TG发各自不同的消息 ----------
+# 一行一条："@用户名 消息"（TG和消息之间空格、逗号或冒号隔开）；
+# 或者Markdown表格："| @用户名 | 消息 |"（表头行、|---|分隔行自动跳过）。
+_LINE_RE = re.compile(
+    r"^((?:https?://)?(?:www\.)?t\.me/[A-Za-z0-9_]+|@[A-Za-z0-9_]+)[\s,，:：;；]*(.*)$")
+_SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")
+_HEADER_NAMES = {"tg", "tg名", "tg用户名", "用户名", "telegram"}
+MAX_MESSAGE_LENGTH = 4096
+
+
+def parse_tg_messages(text):
+    """名单文本 -> (items, bad)。items：[(TG, 消息)]，按出现顺序，完全相同的(TG, 消息)只留一条
+    （同一个TG可以对应多条不同消息）；bad：认不出的原行。"""
+    items, bad, seen = [], [], set()
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("|"):
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            if all(_SEPARATOR_CELL_RE.match(cell) for cell in cells if cell) and any(cells):
+                continue
+            if cells and cells[0].casefold() in _HEADER_NAMES:
+                continue
+            token, message = cells[0], " ".join(cell for cell in cells[1:] if cell)
+        else:
+            match = _LINE_RE.match(line)
+            token, message = (match.group(1), match.group(2).strip()) if match else ("", "")
+        tg = normalize_work_tg(token) if token else ""
+        if not tg or not message or len(message) > MAX_MESSAGE_LENGTH:
+            bad.append(line)
+            continue
+        key = (tg.casefold(), message)
+        if key not in seen:
+            seen.add(key)
+            items.append((tg, message))
+    return items, bad
+
+
+def looks_like_table_attempt(items, bad):
+    """这条消息是不是在"尝试发TG+消息的表"：有认出的行，或有以@/|开头、含t.me的行。
+    都没有的（普通聊天、别的功能的触发词）直接忽略。"""
+    return bool(items) or any(line.startswith(("@", "|")) or "t.me/" in line for line in bad)
+
+
+def preview(message, limit=40):
+    message = " ".join(message.split())
+    return message if len(message) <= limit else message[:limit] + "…"
+
+
+def format_tg_messages(items):
+    return "\n".join(f"{index}. {tg} ← {preview(message)}" for index, (tg, message) in enumerate(items, 1))
+
+
+def chunk_text(text, limit=3500):
+    """长文本按行切成不超过limit字的几段（Telegram单条消息上限4096字）。"""
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        line = line[:limit]
+        if current and len(current) + len(line) + 1 > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        chunks.append(current)
+    return chunks

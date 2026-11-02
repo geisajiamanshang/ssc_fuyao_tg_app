@@ -159,6 +159,8 @@ MONTHLY_REPORTS_SOURCE_CHAT = int(os.environ.get("MONTHLY_REPORTS_SOURCE_CHAT", 
 # 场景二十：SSC在自己的收藏夹发"群发"（整条消息就是这两个字），机器人问名单 -> 确认 -> 问
 # 图文消息 -> 确认，再逐个私发。每一步等SSC回应的最长时间（秒），超时作废要重新发"群发"。
 MASS_SEND_TRIGGER = "群发"
+# 场景二十一："不同群发"：给不同的TG各发不同的消息（一次确认）。
+MASS_SEND_DIFF_TRIGGER = "不同群发"
 MASS_SEND_WAIT_SECONDS = int(os.environ.get("MASS_SEND_WAIT_SECONDS", "1800"))
 # 一次最多群发给多少个TG，防止名单贴错一大串。
 MASS_SEND_MAX_RECIPIENTS = int(os.environ.get("MASS_SEND_MAX_RECIPIENTS", "100"))

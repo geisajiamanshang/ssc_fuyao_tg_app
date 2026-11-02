@@ -94,6 +94,12 @@ SSC Offer 审批流转自动化 主程序。
              任一步回"取消"终止，30分钟没回应作废；机器人的提示都以"【群发】"开头；
              只在生产环境启用；会话等"1"期间，这个"1"不会同时放行Offer草稿
 
+  场景二十一：SSC在自己的收藏夹发送"不同群发"（整条消息就是这四个字）
+          -> 机器人问"TG+各自的消息"清单（一行一条"@用户名 消息"，或Markdown表格）
+          -> 回显解析结果，SSC回"1"确认 -> 给每个TG私发它自己那条消息（纯文本原样发，
+             间隔5-10秒），发完汇总成功/失败；回"取消"终止，30分钟没回应作废；
+             与场景二十共用确认码和限流处理，同时只进行一个群发；只在生产环境启用
+
   场景十一：SSC在自己的收藏夹发送"帐号申请"
           -> 读取"花名册"和"花名册（机器人）"两张在线Google表格（同名以
              "花名册"为准，冲突名单静默按"花名册"处理，不再提示收藏夹），
@@ -680,7 +686,9 @@ async def on_ssc_send_approval(event):
     if getattr(config, "MASS_SEND_ENABLED", False) and approval_code == config.MASS_SEND_CONFIRM_CODE and (
             event.message.id in mass_send_consumed
             or mass_send.waiting_for_confirm(
-                mass_send_events.get("session"), time.time(), config.MASS_SEND_WAIT_SECONDS)):
+                mass_send_events.get("session"), time.time(), config.MASS_SEND_WAIT_SECONDS)
+            or mass_send.waiting_for_confirm(
+                mass_send_events.get("diff_session"), time.time(), config.MASS_SEND_WAIT_SECONDS)):
         return
     async with ssc_send_lock:
         all_outbox_items = list(outbox.all().values())
@@ -1091,7 +1099,7 @@ async def on_ssc_mass_send(event):
     if event.chat_id in config.EXCLUDED_CHAT_IDS:
         return
     text = (event.raw_text or "").strip()
-    if text.startswith(mass_send.NOTICE_PREFIX):
+    if text.startswith(mass_send.NOTICE_PREFIX) or text == config.MASS_SEND_DIFF_TRIGGER:
         return
     session = mass_send_events.get("session") or {}
     in_session = not mass_send.session_expired(session, time.time(), config.MASS_SEND_WAIT_SECONDS)
@@ -1124,9 +1132,13 @@ async def on_ssc_mass_send(event):
             mass_send_consumed.append(event.message.id)
             del mass_send_consumed[:-50]
         if is_trigger:
-            if stage == mass_send.STAGE_SENDING:
+            other = mass_send_events.get("diff_session") or {}
+            other_sending = (not mass_send.session_expired(other, time.time(), config.MASS_SEND_WAIT_SECONDS)
+                             and other.get("stage") == mass_send.STAGE_SENDING)
+            if stage == mass_send.STAGE_SENDING or other_sending:
                 await notify("上一次群发还在进行中，发完会汇报结果，请稍后再发“群发”。")
                 return
+            mass_send_events.set("diff_session", {})  # 同时只进行一个群发会话
             mass_send_events.set("session", {"stage": mass_send.STAGE_WAITING_TGS, "since": time.time()})
             await notify(
                 "请发送要群发的TG，空格隔开，或者一行一个，例如：\n@aaaaa @bbbbb\n"
@@ -1192,6 +1204,143 @@ async def on_ssc_mass_send(event):
             task = asyncio.create_task(run_mass_send(reviewer.id, tgs, content_id))
             mass_send_tasks.add(task)
             task.add_done_callback(mass_send_tasks.discard)
+
+
+async def run_diff_mass_send(reviewer_id, items):
+    """items：[(TG, 消息)]。逐条把各自的消息私发给对应TG（纯文本，原样发，不解析Markdown）；
+    规则同run_mass_send：间隔MASS_SEND_INTERVAL_RANGE秒，限流中止，最后汇总到收藏夹。"""
+
+    async def notify(message):
+        for chunk in mass_send.chunk_text(message):
+            await client.send_message(reviewer_id, chunk, parse_mode=None)
+
+    ok, failed, remaining = [], [], []
+    try:
+        await notify(
+            f"{mass_send.NOTICE_PREFIX}开始不同群发，共{len(items)}条，每条之间随机间隔"
+            f"{config.MASS_SEND_INTERVAL_RANGE[0]}-{config.MASS_SEND_INTERVAL_RANGE[1]}秒，"
+            "发完会汇报结果。")
+        for index, (tg, message) in enumerate(items):
+            try:
+                try:
+                    entity = await client.get_entity(tg)
+                    await client.send_message(entity, message, parse_mode=None)
+                except errors.FloodWaitError as e:
+                    if e.seconds > 120:
+                        raise
+                    await asyncio.sleep(e.seconds + 1)
+                    await client.send_message(entity, message, parse_mode=None)
+                ok.append(tg)
+            except (errors.PeerFloodError, errors.FloodWaitError) as e:
+                log.warning("[不同群发] %s触发限流(%s)，中止，剩余%s条", tg, type(e).__name__, len(items) - index)
+                remaining = [t for t, _ in items[index:]]
+                break
+            except Exception as e:
+                log.warning("[不同群发] 发给%s失败：%r", tg, e)
+                failed.append((tg, mass_send_error_reason(e)))
+            if index < len(items) - 1:
+                await asyncio.sleep(random.uniform(*config.MASS_SEND_INTERVAL_RANGE))
+        log.info("[不同群发] 结束：成功%s，失败%s，未发送%s", len(ok), len(failed), len(remaining))
+    except Exception:
+        log.exception("[不同群发] 执行中出错")
+        remaining = [t for t, _ in items[len(ok) + len(failed):]]
+        await notify(mass_send.NOTICE_PREFIX + "不同群发执行中出错，已中止，请查看机器人日志。")
+    finally:
+        mass_send_events.set("diff_session", {})
+    await notify(mass_send.format_report(ok, failed, remaining))
+
+
+@client.on(events.NewMessage())
+async def on_ssc_diff_mass_send(event):
+    """SSC在自己的收藏夹发"不同群发"（整条消息就是这四个字，MASS_SEND_DIFF_TRIGGER）：
+    机器人问TG和消息 -> SSC发一份"TG 消息"的清单（一行一条，或Markdown表格）
+    -> 机器人回显解析结果，SSC回"1"确认 -> 给每个TG私发它自己那条消息，发完汇总。
+    回"取消"终止；MASS_SEND_WAIT_SECONDS内没回应作废。
+
+    提示都以"【群发】"开头，收到时靠这个前缀忽略；"1"跟"群发"功能一样登记到
+    mass_send_consumed，on_ssc_send_approval看到就让开。"""
+    if event.chat_id in config.EXCLUDED_CHAT_IDS:
+        return
+    text = (event.raw_text or "").strip()
+    if text.startswith(mass_send.NOTICE_PREFIX):
+        return
+    session = mass_send_events.get("diff_session") or {}
+    in_session = not mass_send.session_expired(session, time.time(), config.MASS_SEND_WAIT_SECONDS)
+    is_trigger = text == config.MASS_SEND_DIFF_TRIGGER
+    if not is_trigger and not in_session:
+        return
+    reviewer = await get_ssc_reviewer()
+    if not event.is_private or event.chat_id != reviewer.id or event.sender_id != reviewer.id:
+        return
+    if not config.MASS_SEND_ENABLED:
+        if is_trigger:
+            log.info("[不同群发] 收到触发词，但群发只在生产环境启用，忽略")
+        return
+
+    async def notify(message):
+        for chunk in mass_send.chunk_text(mass_send.NOTICE_PREFIX + message):
+            await client.send_message(reviewer.id, chunk, parse_mode=None)
+
+    minutes = max(1, config.MASS_SEND_WAIT_SECONDS // 60)
+    confirm_code = config.MASS_SEND_CONFIRM_CODE
+    async with mass_send_lock:
+        session = mass_send_events.get("diff_session") or {}
+        in_session = not mass_send.session_expired(session, time.time(), config.MASS_SEND_WAIT_SECONDS)
+        stage = session.get("stage") if in_session else None
+
+        if text == confirm_code and stage in mass_send.CONFIRM_STAGES:
+            mass_send_consumed.append(event.message.id)
+            del mass_send_consumed[:-50]
+        if is_trigger:
+            other = mass_send_events.get("session") or {}
+            other_sending = (not mass_send.session_expired(other, time.time(), config.MASS_SEND_WAIT_SECONDS)
+                             and other.get("stage") == mass_send.STAGE_SENDING)
+            if stage == mass_send.STAGE_SENDING or other_sending:
+                await notify("上一次群发还在进行中，发完会汇报结果，请稍后再发“不同群发”。")
+                return
+            mass_send_events.set("session", {})  # 同时只进行一个群发会话
+            mass_send_events.set("diff_session", {"stage": mass_send.STAGE_DIFF_WAITING_INPUT, "since": time.time()})
+            await notify(
+                "请发送要群发的TG和各自的消息，一行一条（TG和消息之间空格隔开），或者直接发表格：\n"
+                "@aaaaa 给aaaaa的消息\n@bbbbb 给bbbbb的消息\n"
+                "| TG | 消息 |\n|---|---|\n| @aaaaa | 给aaaaa的消息 |\n"
+                f"发送后我会回显解析结果，核对无误回复 {confirm_code} 开始群发；回复 取消 随时终止"
+                f"（{minutes}分钟内有效）。")
+            return
+        if stage is None or stage == mass_send.STAGE_SENDING:
+            return
+        if text == "取消":
+            mass_send_events.set("diff_session", {})
+            await notify("已取消不同群发。")
+            return
+
+        if text == confirm_code and stage == mass_send.STAGE_DIFF_WAITING_CONFIRM:
+            items = [tuple(item) for item in session.get("items", [])]
+            mass_send_events.set("diff_session", {**session, "stage": mass_send.STAGE_SENDING, "since": time.time()})
+            # 发送要花几分钟：放到后台任务里，别卡住这个消息的后续处理。
+            task = asyncio.create_task(run_diff_mass_send(reviewer.id, items))
+            mass_send_tasks.add(task)
+            task.add_done_callback(mass_send_tasks.discard)
+            return
+
+        items, bad = mass_send.parse_tg_messages(text)
+        if not mass_send.looks_like_table_attempt(items, bad):
+            return
+        if bad:
+            shown = [mass_send.preview(line, 60) for line in bad[:10]]
+            await notify(
+                f"有{len(bad)}行认不出（每行要写成 @用户名 消息，用户名至少5个字符，消息不能为空）：\n"
+                + "\n".join(shown) + ("\n…" if len(bad) > 10 else "") + "\n请改好后重新发送完整清单。")
+            return
+        if len(items) > config.MASS_SEND_MAX_RECIPIENTS:
+            await notify(f"清单有{len(items)}条，超过一次最多{config.MASS_SEND_MAX_RECIPIENTS}条的上限，请分批发送。")
+            return
+        mass_send_events.set("diff_session", {
+            "stage": mass_send.STAGE_DIFF_WAITING_CONFIRM, "since": time.time(),
+            "items": [list(item) for item in items]})
+        await notify(
+            f"共{len(items)}条（消息只显示前面一部分，发送时是完整内容）：\n{mass_send.format_tg_messages(items)}\n"
+            f"确认无误回复 {confirm_code} 开始群发；有误请重新发送完整清单；回复 取消 终止。")
 
 
 @client.on(events.NewMessage())
