@@ -304,8 +304,16 @@ WALLET_REMINDER_FORM_SPREADSHEET_ID = os.environ.get(
 )
 WALLET_REMINDER_FORM_SHEET_GID = int(os.environ.get("WALLET_REMINDER_FORM_SHEET_GID", "639628649"))
 
+# 加班登记同步目标表（需要把Google服务账号授权为该表编辑者）。
+OVERTIME_SHEET_SPREADSHEET_ID = os.environ.get(
+    "OVERTIME_SHEET_SPREADSHEET_ID",
+    "1VqoUez_-2YfH8g6gEunoi-U-jy3UnkO3LzNPVj8nCVM",
+)
+OVERTIME_SHEET_GID = int(os.environ.get("OVERTIME_SHEET_GID", "997389568"))
+
 # 测试环境启动时会检查所有可发送目标不属于这些生产群。
 PRODUCTION_CHAT_IDS = frozenset({
+    -1003774272567,  # 加班登记群
     -1003559652510,  # HRBP沟通群
     -1003865890708,  # 联合管理群
     -1004380831613,  # 招聘群
