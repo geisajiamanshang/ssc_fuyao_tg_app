@@ -66,6 +66,12 @@ GROUP_ACCOUNT_REQUEST_WORK = int(os.environ.get(
 GROUP_OFFBOARDING_BUSINESS_SYNC = int(os.environ.get(
     "GROUP_OFFBOARDING_BUSINESS_SYNC", "-5164874973"
 )) or None
+# 场景二十二：加班登记群自动同步到Google表格（仅生产环境启用）。
+OVERTIME_MONITOR_ENABLED = os.environ.get("OVERTIME_MONITOR_ENABLED", "1") == "1"
+OVERTIME_REGISTRATION_GROUP = int(os.environ.get(
+    "OVERTIME_REGISTRATION_GROUP", "-1003774272567"
+)) if OVERTIME_MONITOR_ENABLED else None
+
 # 场景十三：次日培训信息同步目标群。
 GROUP_REMOTE_TRAINING = int(os.environ.get(
     "GROUP_REMOTE_TRAINING", "-1003855659853"
@@ -73,6 +79,7 @@ GROUP_REMOTE_TRAINING = int(os.environ.get(
 
 # ========== 本地状态文件 ==========
 DB_PATH = "offer_state.json"
+OVERTIME_SYNC_STATE_PATH = DB_PATH + ".overtime_sync.json"
 DAILY_REPORT_STATE_PATH = DB_PATH + ".daily_reports.json"
 REGULARIZATION_STATE_PATH = DB_PATH + ".regularization.json"
 ANNIVERSARY_STATE_PATH = DB_PATH + ".anniversary.json"

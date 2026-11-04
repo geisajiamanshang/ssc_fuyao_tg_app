@@ -100,6 +100,12 @@ SSC Offer 审批流转自动化 主程序。
              间隔5-10秒），发完汇总成功/失败；回"取消"终止，30分钟没回应作废；
              与场景二十共用确认码和限流处理，同时只进行一个群发；只在生产环境启用
 
+  场景二十二：加班登记群（-1003774272567）出现同时包含“加班日期/加班时长/加班类型”的登记消息
+          -> 逐人解析消息中的花名、加班日期、加班时长和加班原因
+          -> 单日日期写入G/H两列；日期区间分别写入G/H；花名写入E列、
+             时长写入I列、原因写入L列；同一条消息的多人记录一次追加，
+             按Telegram消息ID去重；只在生产环境启用
+
   场景十一：SSC在自己的收藏夹发送"帐号申请"
           -> 读取"花名册"和"花名册（机器人）"两张在线Google表格（同名以
              "花名册"为准，冲突名单静默按"花名册"处理，不再提示收藏夹），
@@ -210,6 +216,7 @@ from templates import (
 )
 from daily_reports import DailyReportSender
 from roster_code import RosterCodeRepository
+from overtime_sync import OvertimeSheetsRepository, parse_overtime_records
 from regularization import (
     RegularizationDriveRepository,
     build_regularization_messages,
@@ -394,6 +401,47 @@ agreement_repo = OnboardingAgreementRepository(config.ONBOARDING_AGREEMENT_FOLDE
 training_sync_roster_repo = TrainingSyncRosterRepository(
     config.TRAINING_SYNC_ROSTER_SPREADSHEET_ID, config.TRAINING_SYNC_ROSTER_SHEET_GID,
 )
+overtime_sync_events = StateStore(config.OVERTIME_SYNC_STATE_PATH)
+overtime_sync_lock = asyncio.Lock()
+overtime_sheets = OvertimeSheetsRepository(
+    config.OVERTIME_SHEET_SPREADSHEET_ID, config.OVERTIME_SHEET_GID,
+)
+
+
+async def on_overtime_registration(event):
+    """把加班登记群中的一条或多条员工记录追加到加班表。"""
+    if event.chat_id != config.OVERTIME_REGISTRATION_GROUP:
+        return
+    message_text = event.raw_text or ""
+    records = parse_overtime_records(message_text)
+    if not records:
+        return
+
+    event_key = f"{event.chat_id}:{event.message.id}"
+    async with overtime_sync_lock:
+        previous = overtime_sync_events.get(event_key)
+        if previous and previous.get("status") == "completed":
+            return
+        try:
+            written = await asyncio.to_thread(
+                overtime_sheets.append_records, records
+            )
+            overtime_sync_events.set(event_key, {
+                "status": "completed",
+                "record_count": written,
+                "message_id": event.message.id,
+            })
+            log.info(
+                "[加班登记] 已写入%s条：chat_id=%s msg_id=%s",
+                written, event.chat_id, event.message.id,
+            )
+        except Exception:
+            log.exception(
+                "[加班登记] 写入表格失败：chat_id=%s msg_id=%s",
+                event.chat_id, event.message.id,
+            )
+
+
 
 
 async def forward_onboarding_to_hrgs(message, chat_id):
@@ -4493,6 +4541,17 @@ async def main():
         )
     await get_ssc_reviewer()
     await resolve_trigger_bot_id()
+    if config.OVERTIME_MONITOR_ENABLED:
+        client.add_event_handler(
+            on_overtime_registration,
+            events.NewMessage(chats=config.OVERTIME_REGISTRATION_GROUP),
+        )
+        log.info(
+            "[加班登记] 已启用群监听：chat_id=%s spreadsheet=%s gid=%s",
+            config.OVERTIME_REGISTRATION_GROUP,
+            config.OVERTIME_SHEET_SPREADSHEET_ID,
+            config.OVERTIME_SHEET_GID,
+        )
     attendance = None
     if os.environ.get('ATTENDANCE_AUTO_REPLY_ENABLED', '1' if config.ENVIRONMENT == 'test' else '0') == '1':
         attendance = AttendanceReplies(client, StateStore(config.DB_PATH + '.attendance.json'))
